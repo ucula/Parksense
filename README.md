@@ -8,7 +8,7 @@
   <p align="center">
     Intelligent car parking availability monitoring system using IoT sensors and machine learning
     <br />
-    <a href="https://github.com/yourusername/ParkSense"><strong>Explore the docs »</strong></a>
+    <a href=https://docs.google.com/document/d/1GHHl_l5Vo-CsSAlA_s1dFEQFTqM1IijSv1jyiw_WpEk/edit?tab=t.0><strong>Explore the docs »</strong></a>
     <br />
     <br />
 
@@ -145,14 +145,19 @@ npm run dev
 
 ### API Usage
 
-Get current parking status for a specific lot:
+Get all parking logs:
 ```sh
-curl http://localhost:8000/api/parking-lots/1/status
+curl http://localhost:8000/api/parkinglogs
 ```
 
-Get parking availability prediction:
+Check API health:
 ```sh
-curl http://localhost:8000/api/predictions?lot_id=1
+curl http://localhost:8000/health
+```
+
+Access API documentation:
+```
+http://localhost:8000/docs
 ```
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
