@@ -85,14 +85,14 @@ This section provides instructions on setting up ParkSense locally. Follow these
 
 2. Create a `.env` file in the project root with the following configuration:
    ```env
-   POSTGRES_USER=
-   POSTGRES_PASSWORD=
-   POSTGRES_DB=
-   POSTGRES_HOST=postgres
-   POSTGRES_PORT=5432
-   BACKEND_PORT=8000
-   FRONTEND_PORT=3000
-   NEXT_PUBLIC_API_URL=http://localhost:8000
+    DB_USER=b6710545768
+    DB_PASSWORD=peerapas.c@ku.th
+    DB_NAME=b6710545768
+    DB_HOST=iot.cpe.ku.ac.th
+    DB_PORT=3306
+    BACKEND_PORT=8000
+    FRONTEND_PORT=3000
+    NEXT_PUBLIC_API_URL=http://localhost:8000
    ```
 
 3. Start all services using Docker Compose:
