@@ -100,17 +100,7 @@ This section provides instructions on setting up ParkSense locally. Follow these
    docker-compose up --build
    ```
 
-<!-- 4. Initialize the database:
-   ```sh
-   docker-compose exec backend python -m app.init_db
-   ```
-
-5. Seed the database with sample data:
-   ```sh
-   docker-compose exec backend python -m app.seed
-   ```
-
-6. Access the application:
+4. Access the application:
    - Frontend: http://localhost:3000
    - Backend API: http://localhost:8000
    - API Documentation: http://localhost:8000/docs -->
