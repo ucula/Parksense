@@ -100,7 +100,7 @@ This section provides instructions on setting up ParkSense locally. Follow these
    docker-compose up --build
    ```
 
-4. Initialize the database:
+<!-- 4. Initialize the database:
    ```sh
    docker-compose exec backend python -m app.init_db
    ```
@@ -113,7 +113,7 @@ This section provides instructions on setting up ParkSense locally. Follow these
 6. Access the application:
    - Frontend: http://localhost:3000
    - Backend API: http://localhost:8000
-   - API Documentation: http://localhost:8000/docs
+   - API Documentation: http://localhost:8000/docs -->
 
 **For Local Development (without Docker):**
 
@@ -153,11 +153,6 @@ curl http://localhost:8000/api/parkinglogs
 Check API health:
 ```sh
 curl http://localhost:8000/health
-```
-
-Access API documentation:
-```
-http://localhost:8000/docs
 ```
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
