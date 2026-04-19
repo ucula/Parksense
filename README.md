@@ -10,6 +10,8 @@
     <br />
     <a href=https://docs.google.com/document/d/1GHHl_l5Vo-CsSAlA_s1dFEQFTqM1IijSv1jyiw_WpEk/edit?tab=t.0><strong>Explore the docs »</strong></a>
     <br />
+    <a href=https://docs.google.com/document/d/1ahNNu1b3PGR8sIsEEBoCvRBRc65DTKKkgZlgHrcnEi8/edit?tab=t.0><strong>IoT sensor setup guide »</strong></a>
+    <br />
     <br />
 
   </p>
@@ -29,6 +31,7 @@
       <a href="#getting-started">Getting Started</a>
       <ul>
         <li><a href="#prerequisites">Prerequisites</a></li>
+        <li><a href="#iot-sensor-setup-guide">IoT Sensor Setup Guide</a></li>
         <li><a href="#installation">Installation</a></li>
       </ul>
     </li>
@@ -58,7 +61,7 @@ This primary sensor data is integrated with secondary contextual data, such as r
 * [![React][React.js]][React-url]
 * [![FastAPI][FastAPI.tiangolo.com]][FastAPI-url]
 * [![Python][Python.org]][Python-url]
-* [![PostgreSQL][PostgreSQL.org]][PostgreSQL-url]
+* [![MySQL][MySQL.org]][MySQL-url]
 * [![Docker][Docker.com]][Docker-url]
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
@@ -75,6 +78,14 @@ This section provides instructions on setting up ParkSense locally. Follow these
 * Python 3.10+ (for local backend development)
 * Git
 
+### IoT Sensor Setup Guide
+
+This repository focuses on visualizing processed data and serving it through the API/dashboard stack.
+
+For end-to-end IoT deployment details (sensor hardware setup, microcontroller configuration, calibration, and data collection flow), follow the dedicated guide:
+
+- https://docs.google.com/document/d/1ahNNu1b3PGR8sIsEEBoCvRBRc65DTKKkgZlgHrcnEi8/edit?tab=t.0
+
 ### Installation
 
 1. Clone the repository
@@ -83,16 +94,22 @@ This section provides instructions on setting up ParkSense locally. Follow these
    cd ParkSense
    ```
 
-2. Create a `.env` file in the project root with the following configuration:
+2. Create a local `.env` from the example template:
+  ```sh
+  cp .env.example .env
+  ```
+
+  Then edit `.env` values for your environment:
    ```env
-    DB_USER=b6710545768
-    DB_PASSWORD=peerapas.c@ku.th
-    DB_NAME=b6710545768
-    DB_HOST=iot.cpe.ku.ac.th
-    DB_PORT=3306
-    BACKEND_PORT=8000
-    FRONTEND_PORT=3000
-    NEXT_PUBLIC_API_URL=http://localhost:8000
+   DB_USER=parksense_user
+   DB_PASSWORD=change_me
+   DB_NAME=parksense_db
+   DB_HOST=localhost
+  DB_PORT=3306
+  BACKEND_PORT=8000
+  FRONTEND_PORT=3000
+  NEXT_PUBLIC_API_URL=http://localhost:8000/
+   DEBUG=False
    ```
 
 3. Start all services using Docker Compose:
@@ -140,6 +157,11 @@ Get all parking logs:
 curl http://localhost:8000/api/parkinglogs
 ```
 
+Get dashboard payload from park_logs:
+```sh
+curl "http://localhost:8000/api/park-logs/dashboard?bucket=hour&limit=200"
+```
+
 Check API health:
 ```sh
 curl http://localhost:8000/health
@@ -167,7 +189,7 @@ curl http://localhost:8000/health
 [FastAPI-url]: https://fastapi.tiangolo.com/
 [Python.org]: https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white
 [Python-url]: https://www.python.org/
-[PostgreSQL.org]: https://img.shields.io/badge/PostgreSQL-316192?style=for-the-badge&logo=postgresql&logoColor=white
-[PostgreSQL-url]: https://www.postgresql.org/
+[MySQL.org]: https://img.shields.io/badge/MySQL-4479A1?style=for-the-badge&logo=mysql&logoColor=white
+[MySQL-url]: https://www.mysql.com/
 [Docker.com]: https://img.shields.io/badge/Docker-2496ED?style=for-the-badge&logo=docker&logoColor=white
 [Docker-url]: https://www.docker.com/

@@ -2,6 +2,9 @@
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
+import { API_BASE_URL } from '@/constants';
+
+const PAGE_SIZE = 20;
 
 interface ParkingLog {
   id: number;
@@ -29,10 +32,71 @@ interface ParkingLog {
   lidar_out_cm: number;
 }
 
+const TABLE_COLUMNS: Array<{
+  key: keyof ParkingLog;
+  label: string;
+  kind?: 'datetime' | 'bool' | 'float';
+}> = [
+  { key: 'id', label: 'id' },
+  { key: 'timestamp', label: 'timestamp', kind: 'datetime' },
+  { key: 'in_count', label: 'in_count' },
+  { key: 'out_count', label: 'out_count' },
+  { key: 'net_flow', label: 'net_flow' },
+  { key: 'current_vehicles', label: 'current_vehicles' },
+  { key: 'parking_percentage', label: 'parking_percentage', kind: 'float' },
+  { key: 'api_feels_like', label: 'api_feels_like', kind: 'float' },
+  { key: 'api_humidity', label: 'api_humidity' },
+  { key: 'api_clouds', label: 'api_clouds' },
+  { key: 'api_temperature', label: 'api_temperature', kind: 'float' },
+  { key: 'board_temperature', label: 'board_temperature', kind: 'float' },
+  { key: 'is_raining', label: 'is_raining', kind: 'bool' },
+  { key: 'pir_in_trigger', label: 'pir_in_trigger' },
+  { key: 'raw_ultrasonic_in_us', label: 'raw_ultrasonic_in_us' },
+  { key: 'ultrasonic_in_cm', label: 'ultrasonic_in_cm', kind: 'float' },
+  { key: 'raw_lidar_in_analog', label: 'raw_lidar_in_analog' },
+  { key: 'pir_out_trigger', label: 'pir_out_trigger' },
+  { key: 'raw_ultrasonic_out_us', label: 'raw_ultrasonic_out_us' },
+  { key: 'ultrasonic_out_cm', label: 'ultrasonic_out_cm', kind: 'float' },
+  { key: 'raw_lidar_out_analog', label: 'raw_lidar_out_analog' },
+  { key: 'lidar_in_cm', label: 'lidar_in_cm', kind: 'float' },
+  { key: 'lidar_out_cm', label: 'lidar_out_cm', kind: 'float' },
+];
+
+function formatCellValue(column: (typeof TABLE_COLUMNS)[number], value: unknown): string {
+  if (value === null || value === undefined) {
+    return '-';
+  }
+
+  if (column.kind === 'datetime') {
+    const date = new Date(String(value));
+    return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
+  }
+
+  if (column.kind === 'bool') {
+    if (typeof value === 'boolean') {
+      return value ? 'true' : 'false';
+    }
+    if (typeof value === 'number') {
+      return value !== 0 ? 'true' : 'false';
+    }
+    const normalized = String(value).trim().toLowerCase();
+    return ['1', 'true', 'yes', 'y', 't'].includes(normalized) ? 'true' : 'false';
+  }
+
+  if (column.kind === 'float') {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric.toFixed(2) : String(value);
+  }
+
+  return String(value);
+}
+
 export default function DatabasePage() {
   const [parkingLogs, setParkingLogs] = useState<ParkingLog[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [currentPage, setCurrentPage] = useState(0);
+  const [hasNextPage, setHasNextPage] = useState(false);
 
   useEffect(() => {
     const fetchParkingLogs = async () => {
@@ -40,13 +104,18 @@ export default function DatabasePage() {
         setLoading(true);
         setError(null);
 
-        // Fetch parking logs
-        const response = await fetch('http://localhost:8000/api/parkinglogs');
+        // Fetch one extra row to determine whether a next page exists.
+        const offset = currentPage * PAGE_SIZE;
+        const response = await fetch(
+          `${API_BASE_URL}/api/parkinglogs?limit=${PAGE_SIZE + 1}&offset=${offset}`,
+        );
         if (!response.ok) {
           throw new Error(`Failed to fetch parking logs: ${response.statusText}`);
         }
         const data = await response.json();
-        setParkingLogs(Array.isArray(data) ? data : []);
+        const rows = Array.isArray(data) ? data : [];
+        setHasNextPage(rows.length > PAGE_SIZE);
+        setParkingLogs(rows.slice(0, PAGE_SIZE));
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Unknown error occurred');
         console.error('Error fetching parking logs:', err);
@@ -56,26 +125,10 @@ export default function DatabasePage() {
     };
 
     fetchParkingLogs();
-  }, []);
+  }, [currentPage]);
 
-  if (loading) {
-    return (
-      <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-8">
-        <div className="max-w-6xl mx-auto">
-          <div className="flex justify-between items-center mb-8">
-            <h1 className="text-4xl font-bold text-gray-800">Parking Logs Viewer</h1>
-            <Link href="/" className="px-6 py-3 bg-blue-600 text-white rounded-lg font-semibold hover:bg-blue-700 transition-colors">
-              Back to Dashboard
-            </Link>
-          </div>
-          <div className="bg-white rounded-lg shadow-lg p-8 text-center">
-            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600 mx-auto"></div>
-            <p className="text-gray-600 mt-4">Loading parking logs...</p>
-          </div>
-        </div>
-      </div>
-    );
-  }
+  const startRow = currentPage * PAGE_SIZE + 1;
+  const endRow = currentPage * PAGE_SIZE + parkingLogs.length;
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-8">
@@ -96,70 +149,57 @@ export default function DatabasePage() {
 
         {/* Parking Logs Table */}
         <div className="bg-white rounded-lg shadow-lg overflow-hidden">
+          <div className="px-4 py-3 border-b border-gray-200 flex items-center justify-between gap-3">
+            <p className="text-sm text-gray-600">
+              {parkingLogs.length > 0 ? `Showing ${startRow}-${endRow}` : 'No rows'}
+            </p>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setCurrentPage((prev) => Math.max(prev - 1, 0))}
+                disabled={loading || currentPage === 0}
+                className="px-3 py-1.5 rounded-md border border-gray-300 text-gray-700 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50 transition-colors"
+                aria-label="Previous page"
+              >
+                &lt;
+              </button>
+              <span className="text-sm text-gray-700 min-w-16 text-center">Page {currentPage + 1}</span>
+              <button
+                type="button"
+                onClick={() => setCurrentPage((prev) => prev + 1)}
+                disabled={loading || !hasNextPage}
+                className="px-3 py-1.5 rounded-md border border-gray-300 text-gray-700 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50 transition-colors"
+                aria-label="Next page"
+              >
+                &gt;
+              </button>
+            </div>
+          </div>
+
           {parkingLogs.length === 0 ? (
             <div className="p-8 text-center text-gray-500">
-              No parking logs found in database
+              {loading ? 'Loading parking logs...' : 'No parking logs found in database'}
             </div>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead className="bg-indigo-600 text-white sticky top-0">
                   <tr>
-                    <th className="px-3 py-2 text-left font-semibold">ID</th>
-                    <th className="px-3 py-2 text-left font-semibold">Timestamp</th>
-                    <th className="px-3 py-2 text-left font-semibold">Vehicles</th>
-                    <th className="px-3 py-2 text-left font-semibold">In/Out</th>
-                    <th className="px-3 py-2 text-left font-semibold">% Full</th>
-                    <th className="px-3 py-2 text-left font-semibold">Temp (°C)</th>
-                    <th className="px-3 py-2 text-left font-semibold">Weather</th>
-                    <th className="px-3 py-2 text-left font-semibold">Sensors In</th>
-                    <th className="px-3 py-2 text-left font-semibold">Sensors Out</th>
+                    {TABLE_COLUMNS.map((column) => (
+                      <th key={column.key} className="px-3 py-2 text-left font-semibold whitespace-nowrap">
+                        {column.label}
+                      </th>
+                    ))}
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-200">
                   {parkingLogs.map((log) => (
                     <tr key={log.id} className="hover:bg-gray-50 transition-colors">
-                      <td className="px-3 py-2 text-gray-800 font-semibold">{log.id}</td>
-                      <td className="px-3 py-2 text-gray-700 text-xs">
-                        {new Date(log.timestamp).toLocaleString()}
-                      </td>
-                      <td className="px-3 py-2 text-gray-700 font-semibold">
-                        {log.current_vehicles}
-                      </td>
-                      <td className="px-3 py-2 text-gray-700 text-xs">
-                        {log.in_count} / {log.out_count}
-                      </td>
-                      <td className="px-3 py-2 text-gray-700 font-semibold">
-                        {log.parking_percentage.toFixed(1)}%
-                      </td>
-                      <td className="px-3 py-2 text-gray-700">
-                        {log.board_temperature.toFixed(1)}
-                      </td>
-                      <td className="px-3 py-2 text-gray-700 text-xs">
-                        {log.api_temperature.toFixed(1)}°C {log.is_raining ? '🌧️' : '☀️'}
-                      </td>
-                      <td className="px-3 py-2 text-gray-700 text-xs">
-                        <div className="flex flex-col gap-1">
-                          <span>US: {log.ultrasonic_in_cm.toFixed(1)}cm</span>
-                          <span>LIDAR: {log.lidar_in_cm.toFixed(1)}cm</span>
-                          <span className={`px-2 py-0.5 rounded text-xs font-semibold ${
-                            log.pir_in_trigger ? 'bg-orange-100 text-orange-800' : 'bg-gray-100 text-gray-800'
-                          }`}>
-                            PIR: {log.pir_in_trigger ? 'TRIGGERED' : '-'}
-                          </span>
-                        </div>
-                      </td>
-                      <td className="px-3 py-2 text-gray-700 text-xs">
-                        <div className="flex flex-col gap-1">
-                          <span>US: {log.ultrasonic_out_cm.toFixed(1)}cm</span>
-                          <span>LIDAR: {log.lidar_out_cm.toFixed(1)}cm</span>
-                          <span className={`px-2 py-0.5 rounded text-xs font-semibold ${
-                            log.pir_out_trigger ? 'bg-orange-100 text-orange-800' : 'bg-gray-100 text-gray-800'
-                          }`}>
-                            PIR: {log.pir_out_trigger ? 'TRIGGERED' : '-'}
-                          </span>
-                        </div>
-                      </td>
+                      {TABLE_COLUMNS.map((column) => (
+                        <td key={`${log.id}-${column.key}`} className="px-3 py-2 text-gray-700 text-xs whitespace-nowrap">
+                          {formatCellValue(column, log[column.key])}
+                        </td>
+                      ))}
                     </tr>
                   ))}
                 </tbody>

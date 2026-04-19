@@ -1,99 +1,257 @@
 'use client'
 
-import React, { useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { API_BASE_URL } from '@/constants'
 
 type Bucket = 'minute' | 'hour' | 'day'
-type CountedFilter = 'ALL' | 'COUNTED' | 'UNCOUNTED'
-
-interface DrilldownState {
-  timestamp: string | null
-  direction: string | null
-  isCounted: boolean | null
-  eventId: number | null
-}
+type DirectionViewFilter = 'ALL' | 'IN' | 'OUT' | 'FLAT'
+type RainFilter = 'ALL' | 'RAIN' | 'DRY'
+type ViewTab = 'overview' | 'table'
+const FULL_TABLE_PAGE_SIZE = 30
 
 interface Filters {
   startTime: string
   endTime: string
   bucket: Bucket
-  direction: string
-  countedFilter: CountedFilter
+  directionView: DirectionViewFilter
+  rainFilter: RainFilter
   boardTempMin: string
   boardTempMax: string
-  ultrasonicMin: string
-  ultrasonicMax: string
-  sharpMin: string
-  sharpMax: string
+  ultrasonicInMin: string
+  ultrasonicInMax: string
+  ultrasonicOutMin: string
+  ultrasonicOutMax: string
+  lidarInMin: string
+  lidarInMax: string
+  lidarOutMin: string
+  lidarOutMax: string
   searchId: string
   limit: number
+  offset: number
 }
 
-interface Kpis {
-  total_events: number
-  counted_events: number
-  count_rate: number
-  avg_ultrasonic_cm: number | null
-  avg_sharp_cm: number | null
-  avg_board_temp: number | null
+interface DrilldownState {
+  bucketTimestamp: string | null
+  directionView: string | null
+  isRaining: boolean | null
+  rowId: number | null
 }
 
-interface EventCountBucket {
+interface DashboardKpis {
+  total_logs: number
+  current_vehicles_latest: number
+  avg_parking_percentage: number | null
+  total_in: number
+  total_out: number
+  latest_net_flow: number
+  rain_ratio: number
+  avg_board_temperature: number | null
+}
+
+interface TrendPoint {
   timestamp: string
-  total: number
-  direction: Record<string, number>
+  rows: number
+  current_vehicles: number | null
+  parking_percentage: number | null
+  in_count: number
+  out_count: number
+  net_flow: number
+  api_temperature: number | null
+  api_feels_like: number | null
+  api_humidity: number | null
+  api_clouds: number | null
+  board_temperature: number | null
+  ultrasonic_in_cm: number | null
+  lidar_in_cm: number | null
+  pir_in_trigger: number
+  ultrasonic_out_cm: number | null
+  lidar_out_cm: number | null
+  pir_out_trigger: number
+  rain_ratio: number
 }
 
-interface CountedBucket {
-  timestamp: string
-  counted: number
-  uncounted: number
-}
-
-interface CorrelationPoint {
+interface TempParkingPoint {
   id: number
   timestamp: string
-  ultrasonic_cm: number | null
-  sharp_cm: number | null
-  is_counted: boolean
-  direction: string
+  api_temperature: number | null
+  parking_percentage: number | null
+  is_raining: boolean
 }
 
-interface EventRow {
+interface RawConvertedPoint {
   id: number
   timestamp: string
-  direction: string
-  raw_ultrasonic_us: number | null
-  ultrasonic_cm: number | null
-  raw_sharp_analog: number | null
-  sharp_cm: number | null
-  board_temp: number | null
-  is_counted: boolean
+  raw: number
+  converted: number
+}
+
+interface BoardTempSensorPoint {
+  id: number
+  timestamp: string
+  board_temperature: number
+  ultrasonic_in_cm: number | null
+  ultrasonic_out_cm: number | null
+  lidar_in_cm: number | null
+  lidar_out_cm: number | null
+}
+
+interface CorrelationPair {
+  x: string
+  y: string
+  value: number | null
+}
+
+interface CorrelationMatrix {
+  metrics: string[]
+  pairs: CorrelationPair[]
+}
+
+interface AnomalyFlag {
+  id: number
+  timestamp: string
+  severity: 'LOW' | 'MEDIUM' | 'HIGH'
+  reasons: string[]
+  direction_view: string
+  current_vehicles: number
+  net_flow: number
+  sensor_gap_in: number | null
+  sensor_gap_out: number | null
+}
+
+interface SensorBaselines {
+  sensor_gap_in: {
+    p50: number | null
+    p95: number | null
+  }
+  sensor_gap_out: {
+    p50: number | null
+    p95: number | null
+  }
+  occupancy_change_abs: {
+    p95: number | null
+  }
+}
+
+interface ParkingLogRow {
+  id: number
+  timestamp: string
+  in_count: number
+  out_count: number
+  net_flow: number
+  current_vehicles: number
+  parking_percentage: number | null
+  api_feels_like: number | null
+  api_humidity: number | null
+  api_clouds: number | null
+  api_temperature: number | null
+  board_temperature: number | null
+  is_raining: boolean
+  pir_in_trigger: number
+  raw_ultrasonic_in_us: number | null
+  ultrasonic_in_cm: number | null
+  raw_lidar_in_analog: number | null
+  pir_out_trigger: number
+  raw_ultrasonic_out_us: number | null
+  ultrasonic_out_cm: number | null
+  raw_lidar_out_analog: number | null
+  lidar_in_cm: number | null
+  lidar_out_cm: number | null
+  direction_view: string
+  occupancy_change: number | null
+  in_out_ratio: number
+  sensor_gap_in: number | null
+  sensor_gap_out: number | null
 }
 
 interface DashboardData {
-  kpis: Kpis
+  source: string
+  kpis: DashboardKpis
   direction_breakdown: Record<string, number>
-  event_count_over_time: EventCountBucket[]
-  counted_vs_uncounted_over_time: CountedBucket[]
-  correlation_points: CorrelationPoint[]
-  events: EventRow[]
+  trends: TrendPoint[]
+  rain_vs_occupancy: {
+    raining_logs: number
+    dry_logs: number
+    raining_avg_current_vehicles: number | null
+    dry_avg_current_vehicles: number | null
+  }
+  temp_vs_parking_scatter: TempParkingPoint[]
+  raw_vs_converted_checks: {
+    ultrasonic_in: RawConvertedPoint[]
+    ultrasonic_out: RawConvertedPoint[]
+    lidar_in: RawConvertedPoint[]
+    lidar_out: RawConvertedPoint[]
+  }
+  board_temp_sensor_scatter: BoardTempSensorPoint[]
+  sensor_baselines: SensorBaselines
+  anomaly_flags: AnomalyFlag[]
+  correlation_matrix: CorrelationMatrix
+  logs: ParkingLogRow[]
+  total_filtered_logs: number
+  returned_logs: number
 }
 
 const INITIAL_FILTERS: Filters = {
   startTime: '',
   endTime: '',
   bucket: 'hour',
-  direction: 'ALL',
-  countedFilter: 'ALL',
+  directionView: 'ALL',
+  rainFilter: 'ALL',
   boardTempMin: '',
   boardTempMax: '',
-  ultrasonicMin: '',
-  ultrasonicMax: '',
-  sharpMin: '',
-  sharpMax: '',
+  ultrasonicInMin: '',
+  ultrasonicInMax: '',
+  ultrasonicOutMin: '',
+  ultrasonicOutMax: '',
+  lidarInMin: '',
+  lidarInMax: '',
+  lidarOutMin: '',
+  lidarOutMax: '',
   searchId: '',
-  limit: 500,
+  limit: 5000,
+  offset: 0,
+}
+
+const TABLE_COLUMNS: Array<{
+  key: keyof ParkingLogRow
+  label: string
+  kind?: 'datetime' | 'bool' | 'float'
+}> = [
+  { key: 'id', label: 'id' },
+  { key: 'timestamp', label: 'timestamp', kind: 'datetime' },
+  { key: 'in_count', label: 'in_count' },
+  { key: 'out_count', label: 'out_count' },
+  { key: 'net_flow', label: 'net_flow' },
+  { key: 'current_vehicles', label: 'current_vehicles' },
+  { key: 'parking_percentage', label: 'parking_percentage', kind: 'float' },
+  { key: 'api_feels_like', label: 'api_feels_like', kind: 'float' },
+  { key: 'api_humidity', label: 'api_humidity', kind: 'float' },
+  { key: 'api_clouds', label: 'api_clouds', kind: 'float' },
+  { key: 'api_temperature', label: 'api_temperature', kind: 'float' },
+  { key: 'board_temperature', label: 'board_temperature', kind: 'float' },
+  { key: 'is_raining', label: 'is_raining', kind: 'bool' },
+  { key: 'pir_in_trigger', label: 'pir_in_trigger' },
+  { key: 'raw_ultrasonic_in_us', label: 'raw_ultrasonic_in_us', kind: 'float' },
+  { key: 'ultrasonic_in_cm', label: 'ultrasonic_in_cm', kind: 'float' },
+  { key: 'raw_lidar_in_analog', label: 'raw_lidar_in_analog', kind: 'float' },
+  { key: 'pir_out_trigger', label: 'pir_out_trigger' },
+  { key: 'raw_ultrasonic_out_us', label: 'raw_ultrasonic_out_us', kind: 'float' },
+  { key: 'ultrasonic_out_cm', label: 'ultrasonic_out_cm', kind: 'float' },
+  { key: 'raw_lidar_out_analog', label: 'raw_lidar_out_analog', kind: 'float' },
+  { key: 'lidar_in_cm', label: 'lidar_in_cm', kind: 'float' },
+  { key: 'lidar_out_cm', label: 'lidar_out_cm', kind: 'float' },
+  { key: 'direction_view', label: 'direction_view' },
+  { key: 'occupancy_change', label: 'occupancy_change', kind: 'float' },
+  { key: 'in_out_ratio', label: 'in_out_ratio', kind: 'float' },
+  { key: 'sensor_gap_in', label: 'sensor_gap_in', kind: 'float' },
+  { key: 'sensor_gap_out', label: 'sensor_gap_out', kind: 'float' },
+]
+
+function toNumber(value: string): number | null {
+  if (!value.trim()) {
+    return null
+  }
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : null
 }
 
 function formatDateInput(value: string): string | null {
@@ -103,23 +261,37 @@ function formatDateInput(value: string): string | null {
   return `${value.replace('T', ' ')}:00`
 }
 
-function toNumber(value: string): number | null {
-  if (value.trim() === '') {
-    return null
-  }
-  const numeric = Number(value)
-  return Number.isFinite(numeric) ? numeric : null
-}
-
-function formatMetric(value: number | null, unit = ''): string {
+function formatNumber(value: number | null, digits = 2): string {
   if (value === null || Number.isNaN(value)) {
     return '-'
   }
-  return `${value.toFixed(2)}${unit}`
+  return value.toFixed(digits)
 }
 
-function formatPercent(value: number): string {
-  return `${(value * 100).toFixed(1)}%`
+function formatPercentRatio(ratio: number): string {
+  return `${(ratio * 100).toFixed(1)}%`
+}
+
+function formatCellValue(column: (typeof TABLE_COLUMNS)[number], value: unknown): string {
+  if (value === null || value === undefined) {
+    return '-'
+  }
+
+  if (column.kind === 'datetime') {
+    const date = new Date(String(value))
+    return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString()
+  }
+
+  if (column.kind === 'bool') {
+    return value ? 'true' : 'false'
+  }
+
+  if (column.kind === 'float') {
+    const numeric = Number(value)
+    return Number.isFinite(numeric) ? numeric.toFixed(2) : String(value)
+  }
+
+  return String(value)
 }
 
 function bucketTimestampString(timestamp: string, bucket: Bucket): string {
@@ -133,53 +305,60 @@ function bucketTimestampString(timestamp: string, bucket: Bucket): string {
   return `${normalized.slice(0, 13)}:00:00`
 }
 
-function exportCsv(rows: EventRow[]): void {
-  const headers = [
-    'id',
-    'timestamp',
-    'direction',
-    'raw_ultrasonic_us',
-    'ultrasonic_cm',
-    'raw_sharp_analog',
-    'sharp_cm',
-    'board_temp',
-    'is_counted',
-  ]
-
-  const csvBody = rows
+function exportCsv(rows: ParkingLogRow[]): void {
+  const headers = TABLE_COLUMNS.map((column) => column.label)
+  const body = rows
     .map((row) =>
-      [
-        row.id,
-        row.timestamp,
-        row.direction,
-        row.raw_ultrasonic_us ?? '',
-        row.ultrasonic_cm ?? '',
-        row.raw_sharp_analog ?? '',
-        row.sharp_cm ?? '',
-        row.board_temp ?? '',
-        row.is_counted ? 'true' : 'false',
-      ]
-        .map((cell) => `"${String(cell).replace(/"/g, '""')}"`)
+      TABLE_COLUMNS.map((column) => formatCellValue(column, row[column.key]))
+        .map((value) => `"${String(value).replace(/"/g, '""')}"`)
         .join(','),
     )
     .join('\n')
 
-  const csv = `${headers.join(',')}\n${csvBody}`
+  const csv = `${headers.join(',')}\n${body}`
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
   const url = URL.createObjectURL(blob)
   const link = document.createElement('a')
   link.href = url
-  link.download = `parking_events_${new Date().toISOString()}.csv`
+  link.download = `parking_logs_${new Date().toISOString()}.csv`
   document.body.appendChild(link)
   link.click()
   document.body.removeChild(link)
   URL.revokeObjectURL(url)
 }
 
-function buildDashboardUrl(filters: Filters): string {
+function exportObjectRowsAsCsv(rows: Array<Record<string, unknown>>, fileName: string): void {
+  if (rows.length === 0) {
+    return
+  }
+
+  const headers = Array.from(new Set(rows.flatMap((row) => Object.keys(row))))
+  const body = rows
+    .map((row) =>
+      headers
+        .map((header) => {
+          const value = row[header]
+          return `"${String(value ?? '').replace(/"/g, '""')}"`
+        })
+        .join(','),
+    )
+    .join('\n')
+
+  const csv = `${headers.join(',')}\n${body}`
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = fileName
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  URL.revokeObjectURL(url)
+}
+
+function buildReportUrl(filters: Filters, preset: 'daily' | 'weekly'): string {
   const params = new URLSearchParams()
-  params.set('bucket', filters.bucket)
-  params.set('limit', String(filters.limit))
+  params.set('preset', preset)
 
   const start = formatDateInput(filters.startTime)
   const end = formatDateInput(filters.endTime)
@@ -190,46 +369,81 @@ function buildDashboardUrl(filters: Filters): string {
   if (end) {
     params.set('end_time', end)
   }
-  if (filters.direction !== 'ALL') {
-    params.set('direction', filters.direction)
+
+  return `${API_BASE_URL}/api/park-logs/reports?${params.toString()}`
+}
+
+function buildDashboardUrl(filters: Filters): string {
+  const params = new URLSearchParams()
+  params.set('bucket', filters.bucket)
+  params.set('limit', String(filters.limit))
+  params.set('offset', String(filters.offset))
+
+  const start = formatDateInput(filters.startTime)
+  const end = formatDateInput(filters.endTime)
+
+  if (start) {
+    params.set('start_time', start)
   }
-  if (filters.countedFilter === 'COUNTED') {
-    params.set('is_counted', 'true')
+  if (end) {
+    params.set('end_time', end)
   }
-  if (filters.countedFilter === 'UNCOUNTED') {
-    params.set('is_counted', 'false')
+  if (filters.directionView !== 'ALL') {
+    params.set('direction_view', filters.directionView)
+  }
+  if (filters.rainFilter === 'RAIN') {
+    params.set('is_raining', 'true')
+  }
+  if (filters.rainFilter === 'DRY') {
+    params.set('is_raining', 'false')
   }
 
   const boardTempMin = toNumber(filters.boardTempMin)
   const boardTempMax = toNumber(filters.boardTempMax)
-  const ultrasonicMin = toNumber(filters.ultrasonicMin)
-  const ultrasonicMax = toNumber(filters.ultrasonicMax)
-  const sharpMin = toNumber(filters.sharpMin)
-  const sharpMax = toNumber(filters.sharpMax)
+  const ultrasonicInMin = toNumber(filters.ultrasonicInMin)
+  const ultrasonicInMax = toNumber(filters.ultrasonicInMax)
+  const ultrasonicOutMin = toNumber(filters.ultrasonicOutMin)
+  const ultrasonicOutMax = toNumber(filters.ultrasonicOutMax)
+  const lidarInMin = toNumber(filters.lidarInMin)
+  const lidarInMax = toNumber(filters.lidarInMax)
+  const lidarOutMin = toNumber(filters.lidarOutMin)
+  const lidarOutMax = toNumber(filters.lidarOutMax)
 
   if (boardTempMin !== null) {
-    params.set('board_temp_min', String(boardTempMin))
+    params.set('board_temperature_min', String(boardTempMin))
   }
   if (boardTempMax !== null) {
-    params.set('board_temp_max', String(boardTempMax))
+    params.set('board_temperature_max', String(boardTempMax))
   }
-  if (ultrasonicMin !== null) {
-    params.set('ultrasonic_min', String(ultrasonicMin))
+  if (ultrasonicInMin !== null) {
+    params.set('ultrasonic_in_min', String(ultrasonicInMin))
   }
-  if (ultrasonicMax !== null) {
-    params.set('ultrasonic_max', String(ultrasonicMax))
+  if (ultrasonicInMax !== null) {
+    params.set('ultrasonic_in_max', String(ultrasonicInMax))
   }
-  if (sharpMin !== null) {
-    params.set('sharp_min', String(sharpMin))
+  if (ultrasonicOutMin !== null) {
+    params.set('ultrasonic_out_min', String(ultrasonicOutMin))
   }
-  if (sharpMax !== null) {
-    params.set('sharp_max', String(sharpMax))
+  if (ultrasonicOutMax !== null) {
+    params.set('ultrasonic_out_max', String(ultrasonicOutMax))
+  }
+  if (lidarInMin !== null) {
+    params.set('lidar_in_min', String(lidarInMin))
+  }
+  if (lidarInMax !== null) {
+    params.set('lidar_in_max', String(lidarInMax))
+  }
+  if (lidarOutMin !== null) {
+    params.set('lidar_out_min', String(lidarOutMin))
+  }
+  if (lidarOutMax !== null) {
+    params.set('lidar_out_max', String(lidarOutMax))
   }
   if (filters.searchId.trim()) {
     params.set('search_id', filters.searchId.trim())
   }
 
-  return `${API_BASE_URL}/api/parking-events/dashboard?${params.toString()}`
+  return `${API_BASE_URL}/api/park-logs/dashboard?${params.toString()}`
 }
 
 function useDashboardData(appliedFilters: Filters): {
@@ -289,263 +503,218 @@ function KpiCard({ title, value }: { title: string; value: string }): React.Reac
   )
 }
 
-function EventCountChart({
-  buckets,
-  selectedTimestamp,
-  onSelectTimestamp,
-}: {
-  buckets: EventCountBucket[]
-  selectedTimestamp: string | null
-  onSelectTimestamp: (timestamp: string) => void
-}): React.ReactElement {
-  if (buckets.length === 0) {
-    return <EmptyChartState label="No events in selected range" />
-  }
-
-  const width = 760
-  const height = 250
-  const padding = 30
-  const chartWidth = width - padding * 2
-  const chartHeight = height - padding * 2
-  const maxY = Math.max(1, ...buckets.map((bucket) => bucket.total))
-
-  const getX = (index: number) =>
-    buckets.length === 1 ? padding + chartWidth / 2 : padding + (index / (buckets.length - 1)) * chartWidth
-
-  const getY = (value: number) => padding + chartHeight - (value / maxY) * chartHeight
-
-  const totalPath = buckets
-    .map((bucket, index) => `${index === 0 ? 'M' : 'L'} ${getX(index)} ${getY(bucket.total)}`)
-    .join(' ')
-
-  const inPath = buckets
-    .map((bucket, index) => `${index === 0 ? 'M' : 'L'} ${getX(index)} ${getY(bucket.direction.IN || 0)}`)
-    .join(' ')
-
-  const outPath = buckets
-    .map((bucket, index) => `${index === 0 ? 'M' : 'L'} ${getX(index)} ${getY(bucket.direction.OUT || 0)}`)
-    .join(' ')
-
-  return (
-    <div style={styles.chartWrap}>
-      <svg viewBox={`0 0 ${width} ${height}`} style={styles.svgChart}>
-        <line x1={padding} y1={padding} x2={padding} y2={height - padding} stroke="#8a6f52" strokeWidth="1" />
-        <line x1={padding} y1={height - padding} x2={width - padding} y2={height - padding} stroke="#8a6f52" strokeWidth="1" />
-        <path d={totalPath} fill="none" stroke="#254441" strokeWidth="3" />
-        <path d={inPath} fill="none" stroke="#db5a42" strokeWidth="2" />
-        <path d={outPath} fill="none" stroke="#f0a202" strokeWidth="2" />
-        {buckets.map((bucket, index) => (
-          <circle
-            key={`${bucket.timestamp}-dot`}
-            cx={getX(index)}
-            cy={getY(bucket.total)}
-            r={selectedTimestamp === bucket.timestamp ? 6 : 4}
-            fill={selectedTimestamp === bucket.timestamp ? '#1d3124' : '#254441'}
-            style={{ cursor: 'pointer' }}
-            onClick={() => onSelectTimestamp(bucket.timestamp)}
-          >
-            <title>{`${bucket.timestamp} | total ${bucket.total}`}</title>
-          </circle>
-        ))}
-      </svg>
-      <div style={styles.legendRow}>
-        <span style={styles.legendItem}><i style={{ ...styles.legendDot, background: '#254441' }} />Total</span>
-        <span style={styles.legendItem}><i style={{ ...styles.legendDot, background: '#db5a42' }} />IN</span>
-        <span style={styles.legendItem}><i style={{ ...styles.legendDot, background: '#f0a202' }} />OUT</span>
-      </div>
-    </div>
-  )
-}
-
-function CountedChart({
-  buckets,
-  selectedTimestamp,
-  selectedCounted,
-  onSelect,
-}: {
-  buckets: CountedBucket[]
-  selectedTimestamp: string | null
-  selectedCounted: boolean | null
-  onSelect: (timestamp: string, isCounted: boolean) => void
-}): React.ReactElement {
-  if (buckets.length === 0) {
-    return <EmptyChartState label="No counted breakdown available" />
-  }
-
-  const maxValue = Math.max(...buckets.map((bucket) => bucket.counted + bucket.uncounted), 1)
-  const barWidth = `${Math.max(100 / buckets.length - 1.5, 1)}%`
-
-  return (
-    <div style={styles.stackedContainer}>
-      {buckets.slice(-60).map((bucket) => {
-        const total = bucket.counted + bucket.uncounted
-        const countedHeight = total > 0 ? (bucket.counted / maxValue) * 100 : 0
-        const uncountedHeight = total > 0 ? (bucket.uncounted / maxValue) * 100 : 0
-
-        return (
-          <div key={bucket.timestamp} style={{ ...styles.stackedBar, width: barWidth }} title={`${bucket.timestamp} | counted ${bucket.counted}, uncounted ${bucket.uncounted}`}>
-            <button
-              type="button"
-              style={{
-                ...styles.stackedSegmentButton,
-                ...styles.uncountedSegment,
-                height: `${uncountedHeight}%`,
-                outline:
-                  selectedTimestamp === bucket.timestamp && selectedCounted === false
-                    ? '2px solid #1d3124'
-                    : 'none',
-              }}
-              onClick={() => onSelect(bucket.timestamp, false)}
-              aria-label={`Select uncounted events at ${bucket.timestamp}`}
-            />
-            <button
-              type="button"
-              style={{
-                ...styles.stackedSegmentButton,
-                ...styles.countedSegment,
-                height: `${countedHeight}%`,
-                outline:
-                  selectedTimestamp === bucket.timestamp && selectedCounted === true
-                    ? '2px solid #1d3124'
-                    : 'none',
-              }}
-              onClick={() => onSelect(bucket.timestamp, true)}
-              aria-label={`Select counted events at ${bucket.timestamp}`}
-            />
-          </div>
-        )
-      })}
-      <div style={styles.legendRow}>
-        <span style={styles.legendItem}><i style={{ ...styles.legendDot, background: '#2a9d8f' }} />Counted</span>
-        <span style={styles.legendItem}><i style={{ ...styles.legendDot, background: '#e76f51' }} />Uncounted</span>
-      </div>
-    </div>
-  )
-}
-
-function DirectionBreakdown({
-  breakdown,
-  selectedDirection,
-  onSelectDirection,
-}: {
-  breakdown: Record<string, number>
-  selectedDirection: string | null
-  onSelectDirection: (direction: string) => void
-}): React.ReactElement {
-  const entries = Object.entries(breakdown)
-  const total = entries.reduce((sum, [, count]) => sum + count, 0)
-
-  if (entries.length === 0 || total === 0) {
-    return <EmptyChartState label="No direction data" />
-  }
-
-  return (
-    <div style={styles.breakdownList}>
-      {entries.map(([direction, count]) => {
-        const ratio = (count / total) * 100
-        return (
-          <div key={direction} style={styles.breakdownItem}>
-            <div style={styles.breakdownLabelRow}>
-              <span style={styles.breakdownLabel}>{direction}</span>
-              <span style={styles.breakdownValue}>{count} ({ratio.toFixed(1)}%)</span>
-            </div>
-            <div style={styles.breakdownTrack}>
-              <button
-                type="button"
-                style={{
-                  ...styles.breakdownBar,
-                  width: `${ratio}%`,
-                  background: direction === 'IN' ? '#db5a42' : direction === 'OUT' ? '#f0a202' : '#6f4e37',
-                  opacity: selectedDirection && selectedDirection !== direction ? 0.55 : 1,
-                  border: selectedDirection === direction ? '2px solid #1d3124' : 'none',
-                  cursor: 'pointer',
-                }}
-                onClick={() => onSelectDirection(direction)}
-                aria-label={`Select direction ${direction}`}
-              />
-            </div>
-          </div>
-        )
-      })}
-    </div>
-  )
-}
-
-function CorrelationScatter({
-  points,
-  selectedEventId,
-  onSelectPoint,
-}: {
-  points: CorrelationPoint[]
-  selectedEventId: number | null
-  onSelectPoint: (point: CorrelationPoint) => void
-}): React.ReactElement {
-  const validPoints = points
-    .filter((point) => point.ultrasonic_cm !== null && point.sharp_cm !== null)
-    .slice(0, 1200)
-
-  if (validPoints.length === 0) {
-    return <EmptyChartState label="No correlation points" />
-  }
-
-  const width = 760
-  const height = 280
-  const padding = 36
-
-  const xValues = validPoints.map((point) => point.ultrasonic_cm as number)
-  const yValues = validPoints.map((point) => point.sharp_cm as number)
-  const minX = Math.min(...xValues)
-  const maxX = Math.max(...xValues)
-  const minY = Math.min(...yValues)
-  const maxY = Math.max(...yValues)
-
-  const safeXRange = Math.max(maxX - minX, 1)
-  const safeYRange = Math.max(maxY - minY, 1)
-
-  return (
-    <div style={styles.chartWrap}>
-      <svg viewBox={`0 0 ${width} ${height}`} style={styles.svgChart}>
-        <line x1={padding} y1={padding} x2={padding} y2={height - padding} stroke="#8a6f52" strokeWidth="1" />
-        <line x1={padding} y1={height - padding} x2={width - padding} y2={height - padding} stroke="#8a6f52" strokeWidth="1" />
-        {validPoints.map((point) => {
-          const x =
-            padding + (((point.ultrasonic_cm as number) - minX) / safeXRange) * (width - padding * 2)
-          const y =
-            height -
-            padding -
-            (((point.sharp_cm as number) - minY) / safeYRange) * (height - padding * 2)
-
-          return (
-            <circle
-              key={point.id}
-              cx={x}
-              cy={y}
-              r={selectedEventId === point.id ? 4.4 : 2.8}
-              fill={point.is_counted ? '#2a9d8f' : '#e76f51'}
-              opacity={selectedEventId === point.id ? 1 : 0.75}
-              style={{ cursor: 'pointer' }}
-              onClick={() => onSelectPoint(point)}
-            >
-              <title>{`id ${point.id} | ${point.direction} | u:${point.ultrasonic_cm} s:${point.sharp_cm}`}</title>
-            </circle>
-          )
-        })}
-      </svg>
-      <div style={styles.legendRow}>
-        <span style={styles.legendItem}><i style={{ ...styles.legendDot, background: '#2a9d8f' }} />Counted</span>
-        <span style={styles.legendItem}><i style={{ ...styles.legendDot, background: '#e76f51' }} />Uncounted</span>
-      </div>
-    </div>
-  )
-}
-
 function EmptyChartState({ label }: { label: string }): React.ReactElement {
   return <div style={styles.emptyState}>{label}</div>
 }
 
-function EventTable({ rows }: { rows: EventRow[] }): React.ReactElement {
+function TimeSeriesChart({
+  points,
+  series,
+  selectedTimestamp,
+  onSelectTimestamp,
+  baselineZero = false,
+}: {
+  points: TrendPoint[]
+  series: Array<{ key: keyof TrendPoint; label: string; color: string }>
+  selectedTimestamp: string | null
+  onSelectTimestamp: (timestamp: string) => void
+  baselineZero?: boolean
+}): React.ReactElement {
+  const clipped = points.slice(-72)
+  if (clipped.length === 0) {
+    return <EmptyChartState label="No data in selected range" />
+  }
+
+  const width = 760
+  const height = 260
+  const padding = 34
+
+  const numericValues = clipped.flatMap((point) =>
+    series
+      .map((line) => {
+        const value = point[line.key]
+        return typeof value === 'number' ? value : null
+      })
+      .filter((value): value is number => value !== null),
+  )
+
+  if (numericValues.length === 0) {
+    return <EmptyChartState label="No numeric values for this chart" />
+  }
+
+  const minY = Math.min(...numericValues, baselineZero ? 0 : Number.POSITIVE_INFINITY)
+  const maxY = Math.max(...numericValues, baselineZero ? 0 : Number.NEGATIVE_INFINITY)
+  const yRange = Math.max(maxY - minY, 1)
+
+  const getX = (index: number) =>
+    clipped.length === 1
+      ? padding + (width - padding * 2) / 2
+      : padding + (index / (clipped.length - 1)) * (width - padding * 2)
+
+  const getY = (value: number) =>
+    height - padding - ((value - minY) / yRange) * (height - padding * 2)
+
+  return (
+    <div style={styles.chartWrap}>
+      <svg viewBox={`0 0 ${width} ${height}`} style={styles.svgChart}>
+        <line x1={padding} y1={padding} x2={padding} y2={height - padding} stroke="#8b6b4c" strokeWidth="1" />
+        <line x1={padding} y1={height - padding} x2={width - padding} y2={height - padding} stroke="#8b6b4c" strokeWidth="1" />
+
+        {baselineZero ? (
+          <line
+            x1={padding}
+            y1={getY(0)}
+            x2={width - padding}
+            y2={getY(0)}
+            stroke="#9ea6a8"
+            strokeDasharray="4 3"
+            strokeWidth="1"
+          />
+        ) : null}
+
+        {series.map((line) => {
+          const path = clipped
+            .map((point, index) => {
+              const value = point[line.key]
+              if (typeof value !== 'number') {
+                return null
+              }
+              return `${index === 0 ? 'M' : 'L'} ${getX(index)} ${getY(value)}`
+            })
+            .filter((item): item is string => Boolean(item))
+            .join(' ')
+
+          return <path key={line.label} d={path} fill="none" stroke={line.color} strokeWidth="2.4" />
+        })}
+
+        {clipped.map((point, index) => {
+          const value = point[series[0].key]
+          if (typeof value !== 'number') {
+            return null
+          }
+
+          return (
+            <circle
+              key={`${point.timestamp}-marker`}
+              cx={getX(index)}
+              cy={getY(value)}
+              r={selectedTimestamp === point.timestamp ? 5.2 : 3.5}
+              fill={selectedTimestamp === point.timestamp ? '#0c2d26' : '#184b3f'}
+              style={{ cursor: 'pointer' }}
+              onClick={() => onSelectTimestamp(point.timestamp)}
+            >
+              <title>{point.timestamp}</title>
+            </circle>
+          )
+        })}
+      </svg>
+
+      <div style={styles.legendRow}>
+        {series.map((line) => (
+          <span key={line.label} style={styles.legendItem}>
+            <i style={{ ...styles.legendDot, background: line.color }} />
+            {line.label}
+          </span>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function ScatterChart<T extends { id: number; timestamp?: string | null }>({
+  points,
+  xKey,
+  yKey,
+  xLabel,
+  yLabel,
+  selectedId,
+  onSelect,
+  palette,
+}: {
+  points: T[]
+  xKey: string
+  yKey: string
+  xLabel: string
+  yLabel: string
+  selectedId: number | null
+  onSelect: (id: number, timestamp: string | null) => void
+  palette?: (point: T) => string
+}): React.ReactElement {
+  const valid = points
+    .map((point) => {
+      const pointRecord = point as Record<string, unknown>
+      const x = pointRecord[xKey]
+      const y = pointRecord[yKey]
+      const id = point.id
+      if (typeof x !== 'number' || typeof y !== 'number' || typeof id !== 'number') {
+        return null
+      }
+      return {
+        id,
+        x,
+        y,
+        timestamp: typeof point.timestamp === 'string' ? point.timestamp : null,
+        point,
+      }
+    })
+    .filter((point): point is { id: number; x: number; y: number; timestamp: string | null; point: T } => point !== null)
+    .slice(0, 1400)
+
+  if (valid.length === 0) {
+    return <EmptyChartState label="No scatter points" />
+  }
+
+  const width = 760
+  const height = 260
+  const padding = 36
+
+  const minX = Math.min(...valid.map((point) => point.x))
+  const maxX = Math.max(...valid.map((point) => point.x))
+  const minY = Math.min(...valid.map((point) => point.y))
+  const maxY = Math.max(...valid.map((point) => point.y))
+
+  const xRange = Math.max(maxX - minX, 1)
+  const yRange = Math.max(maxY - minY, 1)
+
+  const getX = (value: number) => padding + ((value - minX) / xRange) * (width - padding * 2)
+  const getY = (value: number) => height - padding - ((value - minY) / yRange) * (height - padding * 2)
+
+  return (
+    <div style={styles.chartWrap}>
+      <svg viewBox={`0 0 ${width} ${height}`} style={styles.svgChart}>
+        <line x1={padding} y1={padding} x2={padding} y2={height - padding} stroke="#8b6b4c" strokeWidth="1" />
+        <line x1={padding} y1={height - padding} x2={width - padding} y2={height - padding} stroke="#8b6b4c" strokeWidth="1" />
+
+        {valid.map((point) => {
+          const color = palette ? palette(point.point) : '#146356'
+          return (
+            <circle
+              key={point.id}
+              cx={getX(point.x)}
+              cy={getY(point.y)}
+              r={selectedId === point.id ? 4.8 : 3.1}
+              fill={color}
+              opacity={selectedId === point.id ? 1 : 0.78}
+              style={{ cursor: 'pointer' }}
+              onClick={() => onSelect(point.id, point.timestamp)}
+            >
+              <title>{`${xLabel}: ${point.x.toFixed(2)} | ${yLabel}: ${point.y.toFixed(2)}`}</title>
+            </circle>
+          )
+        })}
+      </svg>
+
+      <div style={styles.legendRow}>
+        <span style={styles.legendItem}>X: {xLabel}</span>
+        <span style={styles.legendItem}>Y: {yLabel}</span>
+      </div>
+    </div>
+  )
+}
+
+function DataTable({ rows }: { rows: ParkingLogRow[] }): React.ReactElement {
   if (rows.length === 0) {
-    return <div style={styles.emptyState}>No events found for selected filters</div>
+    return <EmptyChartState label="No rows for selected filters and drilldown" />
   }
 
   return (
@@ -553,29 +722,145 @@ function EventTable({ rows }: { rows: EventRow[] }): React.ReactElement {
       <table style={styles.table}>
         <thead>
           <tr>
-            <th style={styles.th}>Timestamp</th>
-            <th style={styles.th}>Direction</th>
-            <th style={styles.th}>Ultrasonic (cm)</th>
-            <th style={styles.th}>Sharp (cm)</th>
-            <th style={styles.th}>Raw US</th>
-            <th style={styles.th}>Raw Sharp</th>
-            <th style={styles.th}>Board Temp</th>
-            <th style={styles.th}>Counted</th>
-            <th style={styles.th}>ID</th>
+            {TABLE_COLUMNS.map((column) => (
+              <th key={column.key} style={styles.th}>
+                {column.label}
+              </th>
+            ))}
           </tr>
         </thead>
         <tbody>
           {rows.map((row) => (
             <tr key={row.id}>
+              {TABLE_COLUMNS.map((column) => (
+                <td key={`${row.id}-${column.key}`} style={styles.td}>
+                  {formatCellValue(column, row[column.key])}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+function CorrelationHeatmap({
+  matrix,
+}: {
+  matrix: CorrelationMatrix | null
+}): React.ReactElement {
+  if (!matrix || matrix.metrics.length === 0 || matrix.pairs.length === 0) {
+    return <EmptyChartState label="No correlation matrix" />
+  }
+
+  const valueMap = new Map<string, number | null>()
+  for (const pair of matrix.pairs) {
+    valueMap.set(`${pair.x}::${pair.y}`, pair.value)
+  }
+
+  const colorFor = (value: number | null): string => {
+    if (value === null) {
+      return '#f3e7d7'
+    }
+    if (value >= 0.7) {
+      return '#0f766e'
+    }
+    if (value >= 0.3) {
+      return '#34a0a4'
+    }
+    if (value > -0.3) {
+      return '#f59e0b'
+    }
+    if (value > -0.7) {
+      return '#fb7185'
+    }
+    return '#be123c'
+  }
+
+  return (
+    <div style={styles.heatmapWrap}>
+      <table style={styles.heatmapTable}>
+        <thead>
+          <tr>
+            <th style={styles.heatmapHeaderCell}>metric</th>
+            {matrix.metrics.map((metric) => (
+              <th key={metric} style={styles.heatmapHeaderCell}>{metric}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {matrix.metrics.map((rowMetric) => (
+            <tr key={rowMetric}>
+              <th style={styles.heatmapHeaderCell}>{rowMetric}</th>
+              {matrix.metrics.map((columnMetric) => {
+                const value = valueMap.get(`${rowMetric}::${columnMetric}`) ?? null
+                return (
+                  <td
+                    key={`${rowMetric}-${columnMetric}`}
+                    style={{
+                      ...styles.heatmapCell,
+                      background: colorFor(value),
+                    }}
+                    title={`${rowMetric} vs ${columnMetric} = ${value === null ? 'n/a' : value.toFixed(3)}`}
+                  >
+                    {value === null ? 'n/a' : value.toFixed(2)}
+                  </td>
+                )
+              })}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+function AnomalyTable({
+  rows,
+  onSelect,
+}: {
+  rows: AnomalyFlag[]
+  onSelect: (id: number, timestamp: string) => void
+}): React.ReactElement {
+  if (rows.length === 0) {
+    return <EmptyChartState label="No anomaly flags in selected range" />
+  }
+
+  return (
+    <div style={styles.tableWrap}>
+      <table style={styles.table}>
+        <thead>
+          <tr>
+            <th style={styles.th}>Severity</th>
+            <th style={styles.th}>Timestamp</th>
+            <th style={styles.th}>ID</th>
+            <th style={styles.th}>Reasons</th>
+            <th style={styles.th}>Direction</th>
+            <th style={styles.th}>Current Vehicles</th>
+            <th style={styles.th}>Net Flow</th>
+            <th style={styles.th}>Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.slice(0, 120).map((row) => (
+            <tr key={`${row.id}-${row.timestamp}`}>
+              <td style={styles.td}>{row.severity}</td>
               <td style={styles.td}>{new Date(row.timestamp).toLocaleString()}</td>
-              <td style={styles.td}>{row.direction}</td>
-              <td style={styles.td}>{row.ultrasonic_cm ?? '-'}</td>
-              <td style={styles.td}>{row.sharp_cm ?? '-'}</td>
-              <td style={styles.td}>{row.raw_ultrasonic_us ?? '-'}</td>
-              <td style={styles.td}>{row.raw_sharp_analog ?? '-'}</td>
-              <td style={styles.td}>{row.board_temp ?? '-'}</td>
-              <td style={styles.td}>{row.is_counted ? 'true' : 'false'}</td>
               <td style={styles.td}>{row.id}</td>
+              <td style={styles.td}>{row.reasons.join(', ')}</td>
+              <td style={styles.td}>{row.direction_view}</td>
+              <td style={styles.td}>{row.current_vehicles}</td>
+              <td style={styles.td}>{row.net_flow}</td>
+              <td style={styles.td}>
+                <button
+                  type="button"
+                  style={styles.applyButton}
+                  onClick={() => onSelect(row.id, row.timestamp)}
+                >
+                  Drilldown
+                </button>
+              </td>
             </tr>
           ))}
         </tbody>
@@ -587,298 +872,868 @@ function EventTable({ rows }: { rows: EventRow[] }): React.ReactElement {
 export default function Home(): React.ReactElement {
   const [draftFilters, setDraftFilters] = useState<Filters>(INITIAL_FILTERS)
   const [appliedFilters, setAppliedFilters] = useState<Filters>(INITIAL_FILTERS)
+  const [activeTab, setActiveTab] = useState<ViewTab>('overview')
+  const [tablePage, setTablePage] = useState(0)
+  const [reportLoading, setReportLoading] = useState<'daily' | 'weekly' | null>(null)
+  const tableSectionRef = useRef<HTMLElement | null>(null)
   const [drilldown, setDrilldown] = useState<DrilldownState>({
-    timestamp: null,
-    direction: null,
-    isCounted: null,
-    eventId: null,
+    bucketTimestamp: null,
+    directionView: null,
+    isRaining: null,
+    rowId: null,
   })
 
   const { data, loading, error } = useDashboardData(appliedFilters)
 
-  const sortedEvents = useMemo(() => {
+  const openTableWithDrilldown = (patch: Partial<DrilldownState>): void => {
+    setDrilldown((prev) => ({ ...prev, ...patch }))
+    setTablePage(0)
+    setActiveTab('table')
+  }
+
+  const exportPresetReport = async (preset: 'daily' | 'weekly'): Promise<void> => {
+    try {
+      setReportLoading(preset)
+      const response = await fetch(buildReportUrl(appliedFilters, preset))
+      const payload = await response.json()
+      if (!response.ok) {
+        throw new Error(payload?.detail || `Unable to export ${preset} report`)
+      }
+
+      const reportRows = Array.isArray(payload?.rows) ? payload.rows : []
+      exportObjectRowsAsCsv(reportRows, `parking_logs_${preset}_report_${new Date().toISOString()}.csv`)
+    } catch (exportError) {
+      const message = exportError instanceof Error ? exportError.message : `Unable to export ${preset} report`
+      window.alert(message)
+    } finally {
+      setReportLoading(null)
+    }
+  }
+
+  const trendPoints = data?.trends || []
+
+  const tableRows = useMemo(() => {
     if (!data) {
       return []
     }
-    return [...data.events].sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
-  }, [data])
 
-  const tableEvents = useMemo(() => {
-    return sortedEvents.filter((row) => {
-      if (drilldown.eventId !== null && row.id !== drilldown.eventId) {
+    return data.logs.filter((row) => {
+      if (drilldown.rowId !== null && row.id !== drilldown.rowId) {
         return false
       }
-      if (drilldown.timestamp && bucketTimestampString(row.timestamp, appliedFilters.bucket) !== drilldown.timestamp) {
+      if (
+        drilldown.bucketTimestamp &&
+        bucketTimestampString(row.timestamp, appliedFilters.bucket) !== drilldown.bucketTimestamp
+      ) {
         return false
       }
-      if (drilldown.direction && row.direction !== drilldown.direction) {
+      if (drilldown.directionView && row.direction_view !== drilldown.directionView) {
         return false
       }
-      if (drilldown.isCounted !== null && row.is_counted !== drilldown.isCounted) {
+      if (drilldown.isRaining !== null && row.is_raining !== drilldown.isRaining) {
         return false
       }
       return true
     })
-  }, [sortedEvents, drilldown, appliedFilters.bucket])
+  }, [data, drilldown, appliedFilters.bucket])
 
-  const activeDrilldowns = useMemo(() => {
+  const totalTablePages = Math.max(1, Math.ceil(tableRows.length / FULL_TABLE_PAGE_SIZE))
+  const currentTablePage = Math.min(tablePage, totalTablePages - 1)
+  const tableStartIndex = currentTablePage * FULL_TABLE_PAGE_SIZE
+  const tablePageRows = tableRows.slice(tableStartIndex, tableStartIndex + FULL_TABLE_PAGE_SIZE)
+  const tableStartRow = tableRows.length > 0 ? tableStartIndex + 1 : 0
+  const tableEndRow = tableStartIndex + tablePageRows.length
+
+  const drilldownChips = useMemo(() => {
     const chips: string[] = []
-    if (drilldown.timestamp) {
-      chips.push(`Time: ${drilldown.timestamp}`)
+    if (drilldown.bucketTimestamp) {
+      chips.push(`Time: ${drilldown.bucketTimestamp}`)
     }
-    if (drilldown.direction) {
-      chips.push(`Direction: ${drilldown.direction}`)
+    if (drilldown.directionView) {
+      chips.push(`Direction: ${drilldown.directionView}`)
     }
-    if (drilldown.isCounted !== null) {
-      chips.push(`Counted: ${drilldown.isCounted ? 'true' : 'false'}`)
+    if (drilldown.isRaining !== null) {
+      chips.push(`Rain: ${drilldown.isRaining ? 'rainy' : 'dry'}`)
     }
-    if (drilldown.eventId !== null) {
-      chips.push(`Event ID: ${drilldown.eventId}`)
+    if (drilldown.rowId !== null) {
+      chips.push(`ID: ${drilldown.rowId}`)
     }
     return chips
   }, [drilldown])
 
-  const entryVsExit = useMemo(() => {
-    if (!data) {
-      return 'IN 0 / OUT 0'
+  const boardTempVsUltrasonicIn = useMemo(
+    () =>
+      (data?.board_temp_sensor_scatter || []).map((point) => ({
+        id: point.id,
+        timestamp: point.timestamp,
+        board_temperature: point.board_temperature,
+        sensor_value: point.ultrasonic_in_cm,
+      })),
+    [data],
+  )
+
+  const boardTempVsLidarOut = useMemo(
+    () =>
+      (data?.board_temp_sensor_scatter || []).map((point) => ({
+        id: point.id,
+        timestamp: point.timestamp,
+        board_temperature: point.board_temperature,
+        sensor_value: point.lidar_out_cm,
+      })),
+    [data],
+  )
+
+  useEffect(() => {
+    if (activeTab === 'table') {
+      tableSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
     }
-    const entry = data.direction_breakdown.IN || 0
-    const exit = data.direction_breakdown.OUT || 0
-    return `IN ${entry} / OUT ${exit}`
-  }, [data])
+  }, [activeTab])
+
+  useEffect(() => {
+    setTablePage(0)
+  }, [drilldown, appliedFilters])
 
   return (
     <main style={styles.page}>
-      <div style={styles.heroBackdrop} />
+      <div style={styles.heroBlob} />
       <section style={styles.container}>
         <header style={styles.header}>
           <div>
-            <p style={styles.eyebrow}>Sensor Event Intelligence Dashboard</p>
-            <h1 style={styles.title}>Parking Events Monitor</h1>
-            <p style={styles.subtitle}>
-              Monitor event volume, counting behavior, and sensor consistency in one investigative workspace.
-            </p>
+            <p style={styles.eyebrow}>Parking Logs Dashboard</p>
+            <h1 style={styles.title}>Occupancy, Weather, and Sensor Diagnostics</h1>
           </div>
         </header>
 
-        <section style={styles.panel}>
-          <h2 style={styles.panelTitle}>Filters</h2>
-          <div style={styles.filterGrid}>
-            <label style={styles.label}>
-              Start time
-              <input
-                type="datetime-local"
-                value={draftFilters.startTime}
-                onChange={(event) => setDraftFilters((prev) => ({ ...prev, startTime: event.target.value }))}
-                style={styles.input}
-              />
-            </label>
-            <label style={styles.label}>
-              End time
-              <input
-                type="datetime-local"
-                value={draftFilters.endTime}
-                onChange={(event) => setDraftFilters((prev) => ({ ...prev, endTime: event.target.value }))}
-                style={styles.input}
-              />
-            </label>
-            <label style={styles.label}>
-              Time bucket
-              <select
-                value={draftFilters.bucket}
-                onChange={(event) => setDraftFilters((prev) => ({ ...prev, bucket: event.target.value as Bucket }))}
-                style={styles.input}
-              >
-                <option value="minute">Minute</option>
-                <option value="hour">Hour</option>
-                <option value="day">Day</option>
-              </select>
-            </label>
-            <label style={styles.label}>
-              Direction
-              <select
-                value={draftFilters.direction}
-                onChange={(event) => setDraftFilters((prev) => ({ ...prev, direction: event.target.value }))}
-                style={styles.input}
-              >
-                <option value="ALL">All</option>
-                <option value="IN">IN</option>
-                <option value="OUT">OUT</option>
-              </select>
-            </label>
-            <label style={styles.label}>
-              Counted status
-              <select
-                value={draftFilters.countedFilter}
-                onChange={(event) =>
-                  setDraftFilters((prev) => ({ ...prev, countedFilter: event.target.value as CountedFilter }))
-                }
-                style={styles.input}
-              >
-                <option value="ALL">All</option>
-                <option value="COUNTED">Counted only</option>
-                <option value="UNCOUNTED">Uncounted only</option>
-              </select>
-            </label>
-            <label style={styles.label}>
-              Search ID
-              <input
-                type="text"
-                placeholder="e.g. 1024"
-                value={draftFilters.searchId}
-                onChange={(event) => setDraftFilters((prev) => ({ ...prev, searchId: event.target.value }))}
-                style={styles.input}
-              />
-            </label>
-            <label style={styles.label}>
-              Board temp min
-              <input
-                type="number"
-                value={draftFilters.boardTempMin}
-                onChange={(event) => setDraftFilters((prev) => ({ ...prev, boardTempMin: event.target.value }))}
-                style={styles.input}
-              />
-            </label>
-            <label style={styles.label}>
-              Board temp max
-              <input
-                type="number"
-                value={draftFilters.boardTempMax}
-                onChange={(event) => setDraftFilters((prev) => ({ ...prev, boardTempMax: event.target.value }))}
-                style={styles.input}
-              />
-            </label>
-            <label style={styles.label}>
-              Ultrasonic min (cm)
-              <input
-                type="number"
-                value={draftFilters.ultrasonicMin}
-                onChange={(event) => setDraftFilters((prev) => ({ ...prev, ultrasonicMin: event.target.value }))}
-                style={styles.input}
-              />
-            </label>
-            <label style={styles.label}>
-              Ultrasonic max (cm)
-              <input
-                type="number"
-                value={draftFilters.ultrasonicMax}
-                onChange={(event) => setDraftFilters((prev) => ({ ...prev, ultrasonicMax: event.target.value }))}
-                style={styles.input}
-              />
-            </label>
-            <label style={styles.label}>
-              Sharp min (cm)
-              <input
-                type="number"
-                value={draftFilters.sharpMin}
-                onChange={(event) => setDraftFilters((prev) => ({ ...prev, sharpMin: event.target.value }))}
-                style={styles.input}
-              />
-            </label>
-            <label style={styles.label}>
-              Sharp max (cm)
-              <input
-                type="number"
-                value={draftFilters.sharpMax}
-                onChange={(event) => setDraftFilters((prev) => ({ ...prev, sharpMax: event.target.value }))}
-                style={styles.input}
-              />
-            </label>
-          </div>
-
-          <div style={styles.filterActionRow}>
-            <button
-              type="button"
-              style={styles.applyButton}
-              onClick={() => {
-                setAppliedFilters({ ...draftFilters })
-                setDrilldown({ timestamp: null, direction: null, isCounted: null, eventId: null })
-              }}
-              disabled={loading}
-            >
-              {loading ? 'Loading...' : 'Apply filters'}
-            </button>
-            <button
-              type="button"
-              style={styles.resetButton}
-              onClick={() => {
-                setDraftFilters(INITIAL_FILTERS)
-                setAppliedFilters(INITIAL_FILTERS)
-                setDrilldown({ timestamp: null, direction: null, isCounted: null, eventId: null })
-              }}
-            >
-              Reset
-            </button>
-            <button
-              type="button"
-              style={styles.exportButton}
-              onClick={() => exportCsv(tableEvents)}
-              disabled={tableEvents.length === 0}
-            >
-              Export CSV
-            </button>
-          </div>
+        <section style={styles.tabRow}>
+          <button
+            type="button"
+            style={{
+              ...styles.tabButton,
+              ...(activeTab === 'overview' ? styles.tabButtonActive : {}),
+            }}
+            onClick={() => setActiveTab('overview')}
+          >
+            Overview
+          </button>
+          <button
+            type="button"
+            style={{
+              ...styles.tabButton,
+              ...(activeTab === 'table' ? styles.tabButtonActive : {}),
+            }}
+            onClick={() => {
+              setTablePage(0)
+              setActiveTab('table')
+            }}
+          >
+            Full Table
+          </button>
         </section>
 
         {error ? <section style={styles.errorBox}>Error: {error}</section> : null}
 
-        <section style={styles.kpiGrid}>
-          <KpiCard title="Total Events" value={String(data?.kpis.total_events ?? 0)} />
-          <KpiCard title="Counted Events" value={String(data?.kpis.counted_events ?? 0)} />
-          <KpiCard title="Count Rate" value={formatPercent(data?.kpis.count_rate ?? 0)} />
-          <KpiCard title="Entry vs Exit" value={entryVsExit} />
-          <KpiCard title="Avg Ultrasonic" value={formatMetric(data?.kpis.avg_ultrasonic_cm ?? null, ' cm')} />
-          <KpiCard title="Avg Sharp" value={formatMetric(data?.kpis.avg_sharp_cm ?? null, ' cm')} />
-          <KpiCard title="Avg Board Temp" value={formatMetric(data?.kpis.avg_board_temp ?? null, ' °C')} />
-        </section>
+        {activeTab === 'overview' ? (
+          <>
+            <section style={styles.kpiGrid}>
+              <KpiCard title="Total Logs" value={String(data?.kpis.total_logs ?? 0)} />
+              <KpiCard title="Current Vehicles (Latest)" value={String(data?.kpis.current_vehicles_latest ?? 0)} />
+              <KpiCard
+                title="Avg Parking Percentage"
+                value={`${formatNumber(data?.kpis.avg_parking_percentage ?? null)}%`}
+              />
+              <KpiCard title="Total In / Total Out" value={`${data?.kpis.total_in ?? 0} / ${data?.kpis.total_out ?? 0}`} />
+              <KpiCard title="Latest Net Flow" value={String(data?.kpis.latest_net_flow ?? 0)} />
+              <KpiCard title="Rain Ratio" value={formatPercentRatio(data?.kpis.rain_ratio ?? 0)} />
+              <KpiCard
+                title="Avg Board Temperature"
+                value={`${formatNumber(data?.kpis.avg_board_temperature ?? null)} C`}
+              />
+              <KpiCard title="Returned Rows" value={`${data?.returned_logs ?? 0}/${data?.total_filtered_logs ?? 0}`} />
+            </section>
 
-        <section style={styles.chartGrid}>
-          <article style={styles.chartCard}>
-            <h3 style={styles.chartTitle}>Event Count Over Time</h3>
-            {loading ? <EmptyChartState label="Loading chart..." /> : <EventCountChart buckets={data?.event_count_over_time || []} selectedTimestamp={drilldown.timestamp} onSelectTimestamp={(timestamp) => setDrilldown((prev) => ({ ...prev, timestamp, eventId: null }))} />}
-          </article>
-          <article style={styles.chartCard}>
-            <h3 style={styles.chartTitle}>Counted vs Uncounted Over Time</h3>
-            {loading ? <EmptyChartState label="Loading chart..." /> : <CountedChart buckets={data?.counted_vs_uncounted_over_time || []} selectedTimestamp={drilldown.timestamp} selectedCounted={drilldown.isCounted} onSelect={(timestamp, isCounted) => setDrilldown((prev) => ({ ...prev, timestamp, isCounted, eventId: null }))} />}
-          </article>
-          <article style={styles.chartCard}>
-            <h3 style={styles.chartTitle}>Direction Breakdown</h3>
-            {loading ? <EmptyChartState label="Loading chart..." /> : <DirectionBreakdown breakdown={data?.direction_breakdown || {}} selectedDirection={drilldown.direction} onSelectDirection={(direction) => setDrilldown((prev) => ({ ...prev, direction, eventId: null }))} />}
-          </article>
-          <article style={styles.chartCardWide}>
-            <h3 style={styles.chartTitle}>Ultrasonic vs Sharp Correlation</h3>
-            {loading ? <EmptyChartState label="Loading chart..." /> : <CorrelationScatter points={data?.correlation_points || []} selectedEventId={drilldown.eventId} onSelectPoint={(point) => setDrilldown({ timestamp: bucketTimestampString(point.timestamp, appliedFilters.bucket), direction: point.direction, isCounted: point.is_counted, eventId: point.id })} />}
-          </article>
-        </section>
+            <section style={styles.chartGrid}>
+              <article style={styles.chartCard}>
+                <h3 style={styles.chartTitle}>Occupancy Trend</h3>
+                {loading ? (
+                  <EmptyChartState label="Loading chart..." />
+                ) : (
+                  <TimeSeriesChart
+                    points={trendPoints}
+                    series={[{ key: 'current_vehicles', label: 'Current Vehicles', color: '#0f766e' }]}
+                    selectedTimestamp={drilldown.bucketTimestamp}
+                    onSelectTimestamp={(timestamp) =>
+                      openTableWithDrilldown({ bucketTimestamp: timestamp, rowId: null })
+                    }
+                  />
+                )}
+              </article>
 
-        <section style={styles.tablePanel}>
-          <h2 style={styles.panelTitle}>Event Log Table</h2>
-          <p style={styles.tableNote}>Sorted by timestamp desc. Click chart points/bars to drill down this table.</p>
-          <div style={styles.drilldownActionRow}>
-            <button
-              type="button"
-              style={styles.applyButton}
-              onClick={() => setDrilldown((prev) => ({ ...prev, isCounted: false, eventId: null }))}
-            >
-              Show uncounted only
-            </button>
-            <button
-              type="button"
-              style={styles.resetButton}
-              onClick={() => setDrilldown({ timestamp: null, direction: null, isCounted: null, eventId: null })}
-            >
-              Clear drilldown
-            </button>
-          </div>
-          {activeDrilldowns.length > 0 ? (
-            <div style={styles.drilldownChipRow}>
-              {activeDrilldowns.map((chip) => (
-                <span key={chip} style={styles.drilldownChip}>{chip}</span>
-              ))}
+              <article style={styles.chartCard}>
+                <h3 style={styles.chartTitle}>Parking Percentage Trend</h3>
+                {loading ? (
+                  <EmptyChartState label="Loading chart..." />
+                ) : (
+                  <TimeSeriesChart
+                    points={trendPoints}
+                    series={[{ key: 'parking_percentage', label: 'Parking %', color: '#d97706' }]}
+                    selectedTimestamp={drilldown.bucketTimestamp}
+                    onSelectTimestamp={(timestamp) =>
+                      openTableWithDrilldown({ bucketTimestamp: timestamp, rowId: null })
+                    }
+                  />
+                )}
+              </article>
+
+              <article style={styles.chartCardWide}>
+                <h3 style={styles.chartTitle}>In/Out and Net Flow</h3>
+                {loading ? (
+                  <EmptyChartState label="Loading chart..." />
+                ) : (
+                  <TimeSeriesChart
+                    points={trendPoints}
+                    series={[
+                      { key: 'in_count', label: 'IN', color: '#ea580c' },
+                      { key: 'out_count', label: 'OUT', color: '#0284c7' },
+                      { key: 'net_flow', label: 'Net Flow', color: '#4338ca' },
+                    ]}
+                    selectedTimestamp={drilldown.bucketTimestamp}
+                    onSelectTimestamp={(timestamp) =>
+                      openTableWithDrilldown({ bucketTimestamp: timestamp, rowId: null })
+                    }
+                    baselineZero
+                  />
+                )}
+              </article>
+
+              <article style={styles.chartCardWide}>
+                <h3 style={styles.chartTitle}>Weather Trend Panel</h3>
+                {loading ? (
+                  <EmptyChartState label="Loading chart..." />
+                ) : (
+                  <TimeSeriesChart
+                    points={trendPoints}
+                    series={[
+                      { key: 'api_temperature', label: 'Temperature', color: '#c2410c' },
+                      { key: 'api_feels_like', label: 'Feels Like', color: '#dc2626' },
+                      { key: 'api_humidity', label: 'Humidity', color: '#0284c7' },
+                      { key: 'api_clouds', label: 'Clouds', color: '#475569' },
+                    ]}
+                    selectedTimestamp={drilldown.bucketTimestamp}
+                    onSelectTimestamp={(timestamp) =>
+                      openTableWithDrilldown({ bucketTimestamp: timestamp, rowId: null })
+                    }
+                  />
+                )}
+              </article>
+
+              <article style={styles.chartCard}>
+                <h3 style={styles.chartTitle}>Rain vs Occupancy</h3>
+                <div style={styles.rainGrid}>
+                  <button
+                    type="button"
+                    style={styles.rainCard}
+                    onClick={() => openTableWithDrilldown({ isRaining: true, rowId: null })}
+                  >
+                    <p style={styles.rainTitle}>Rainy snapshots</p>
+                    <p style={styles.rainValue}>{data?.rain_vs_occupancy.raining_logs ?? 0}</p>
+                    <p style={styles.rainSub}>Avg occupancy {formatNumber(data?.rain_vs_occupancy.raining_avg_current_vehicles ?? null)}</p>
+                  </button>
+                  <button
+                    type="button"
+                    style={styles.rainCard}
+                    onClick={() => openTableWithDrilldown({ isRaining: false, rowId: null })}
+                  >
+                    <p style={styles.rainTitle}>Dry snapshots</p>
+                    <p style={styles.rainValue}>{data?.rain_vs_occupancy.dry_logs ?? 0}</p>
+                    <p style={styles.rainSub}>Avg occupancy {formatNumber(data?.rain_vs_occupancy.dry_avg_current_vehicles ?? null)}</p>
+                  </button>
+                </div>
+              </article>
+
+              <article style={styles.chartCard}>
+                <h3 style={styles.chartTitle}>Direction Breakdown</h3>
+                <div style={styles.breakdownStack}>
+                  {Object.entries(data?.direction_breakdown || {}).map(([key, count]) => (
+                    <button
+                      key={key}
+                      type="button"
+                      style={styles.breakdownItem}
+                      onClick={() => openTableWithDrilldown({ directionView: key, rowId: null })}
+                    >
+                      <span>{key}</span>
+                      <strong>{count}</strong>
+                    </button>
+                  ))}
+                </div>
+              </article>
+
+              <article style={styles.chartCardWide}>
+                <h3 style={styles.chartTitle}>Temperature vs Parking Percentage</h3>
+                {loading ? (
+                  <EmptyChartState label="Loading chart..." />
+                ) : (
+                  <ScatterChart
+                    points={data?.temp_vs_parking_scatter || []}
+                    xKey="api_temperature"
+                    yKey="parking_percentage"
+                    xLabel="Api Temperature"
+                    yLabel="Parking %"
+                    selectedId={drilldown.rowId}
+                    onSelect={(id, timestamp) =>
+                      openTableWithDrilldown({
+                        rowId: id,
+                        bucketTimestamp: timestamp ? bucketTimestampString(timestamp, appliedFilters.bucket) : null,
+                        directionView: null,
+                        isRaining: null,
+                      })
+                    }
+                    palette={(point) => ((point.is_raining as boolean) ? '#0ea5e9' : '#f97316')}
+                  />
+                )}
+              </article>
+
+              <article style={styles.chartCard}>
+                <h3 style={styles.chartTitle}>Inbound Sensor Trend</h3>
+                {loading ? (
+                  <EmptyChartState label="Loading chart..." />
+                ) : (
+                  <TimeSeriesChart
+                    points={trendPoints}
+                    series={[
+                      { key: 'ultrasonic_in_cm', label: 'Ultrasonic In (cm)', color: '#0891b2' },
+                      { key: 'lidar_in_cm', label: 'Lidar In (cm)', color: '#16a34a' },
+                      { key: 'pir_in_trigger', label: 'PIR In Trigger', color: '#dc2626' },
+                    ]}
+                    selectedTimestamp={drilldown.bucketTimestamp}
+                    onSelectTimestamp={(timestamp) =>
+                      openTableWithDrilldown({ bucketTimestamp: timestamp, rowId: null })
+                    }
+                  />
+                )}
+              </article>
+
+              <article style={styles.chartCard}>
+                <h3 style={styles.chartTitle}>Outbound Sensor Trend</h3>
+                {loading ? (
+                  <EmptyChartState label="Loading chart..." />
+                ) : (
+                  <TimeSeriesChart
+                    points={trendPoints}
+                    series={[
+                      { key: 'ultrasonic_out_cm', label: 'Ultrasonic Out (cm)', color: '#0284c7' },
+                      { key: 'lidar_out_cm', label: 'Lidar Out (cm)', color: '#22c55e' },
+                      { key: 'pir_out_trigger', label: 'PIR Out Trigger', color: '#be123c' },
+                    ]}
+                    selectedTimestamp={drilldown.bucketTimestamp}
+                    onSelectTimestamp={(timestamp) =>
+                      openTableWithDrilldown({ bucketTimestamp: timestamp, rowId: null })
+                    }
+                  />
+                )}
+              </article>
+
+              <article style={styles.chartCard}>
+                <h3 style={styles.chartTitle}>Raw vs Converted: Ultrasonic In</h3>
+                {loading ? (
+                  <EmptyChartState label="Loading chart..." />
+                ) : (
+                  <ScatterChart
+                    points={data?.raw_vs_converted_checks.ultrasonic_in || []}
+                    xKey="raw"
+                    yKey="converted"
+                    xLabel="raw_ultrasonic_in_us"
+                    yLabel="ultrasonic_in_cm"
+                    selectedId={drilldown.rowId}
+                    onSelect={(id, timestamp) =>
+                      openTableWithDrilldown({
+                        rowId: id,
+                        bucketTimestamp: timestamp ? bucketTimestampString(timestamp, appliedFilters.bucket) : null,
+                        directionView: null,
+                        isRaining: null,
+                      })
+                    }
+                  />
+                )}
+              </article>
+
+              <article style={styles.chartCard}>
+                <h3 style={styles.chartTitle}>Raw vs Converted: Ultrasonic Out</h3>
+                {loading ? (
+                  <EmptyChartState label="Loading chart..." />
+                ) : (
+                  <ScatterChart
+                    points={data?.raw_vs_converted_checks.ultrasonic_out || []}
+                    xKey="raw"
+                    yKey="converted"
+                    xLabel="raw_ultrasonic_out_us"
+                    yLabel="ultrasonic_out_cm"
+                    selectedId={drilldown.rowId}
+                    onSelect={(id, timestamp) =>
+                      openTableWithDrilldown({
+                        rowId: id,
+                        bucketTimestamp: timestamp ? bucketTimestampString(timestamp, appliedFilters.bucket) : null,
+                        directionView: null,
+                        isRaining: null,
+                      })
+                    }
+                  />
+                )}
+              </article>
+
+              <article style={styles.chartCard}>
+                <h3 style={styles.chartTitle}>Raw vs Converted: Lidar In</h3>
+                {loading ? (
+                  <EmptyChartState label="Loading chart..." />
+                ) : (
+                  <ScatterChart
+                    points={data?.raw_vs_converted_checks.lidar_in || []}
+                    xKey="raw"
+                    yKey="converted"
+                    xLabel="raw_lidar_in_analog"
+                    yLabel="lidar_in_cm"
+                    selectedId={drilldown.rowId}
+                    onSelect={(id, timestamp) =>
+                      openTableWithDrilldown({
+                        rowId: id,
+                        bucketTimestamp: timestamp ? bucketTimestampString(timestamp, appliedFilters.bucket) : null,
+                        directionView: null,
+                        isRaining: null,
+                      })
+                    }
+                  />
+                )}
+              </article>
+
+              <article style={styles.chartCard}>
+                <h3 style={styles.chartTitle}>Raw vs Converted: Lidar Out</h3>
+                {loading ? (
+                  <EmptyChartState label="Loading chart..." />
+                ) : (
+                  <ScatterChart
+                    points={data?.raw_vs_converted_checks.lidar_out || []}
+                    xKey="raw"
+                    yKey="converted"
+                    xLabel="raw_lidar_out_analog"
+                    yLabel="lidar_out_cm"
+                    selectedId={drilldown.rowId}
+                    onSelect={(id, timestamp) =>
+                      openTableWithDrilldown({
+                        rowId: id,
+                        bucketTimestamp: timestamp ? bucketTimestampString(timestamp, appliedFilters.bucket) : null,
+                        directionView: null,
+                        isRaining: null,
+                      })
+                    }
+                  />
+                )}
+              </article>
+
+              <article style={styles.chartCard}>
+                <h3 style={styles.chartTitle}>Board Temp vs Ultrasonic In</h3>
+                {loading ? (
+                  <EmptyChartState label="Loading chart..." />
+                ) : (
+                  <ScatterChart
+                    points={boardTempVsUltrasonicIn}
+                    xKey="board_temperature"
+                    yKey="sensor_value"
+                    xLabel="board_temperature"
+                    yLabel="ultrasonic_in_cm"
+                    selectedId={drilldown.rowId}
+                    onSelect={(id, timestamp) =>
+                      openTableWithDrilldown({
+                        rowId: id,
+                        bucketTimestamp: timestamp ? bucketTimestampString(timestamp, appliedFilters.bucket) : null,
+                        directionView: null,
+                        isRaining: null,
+                      })
+                    }
+                  />
+                )}
+              </article>
+
+              <article style={styles.chartCard}>
+                <h3 style={styles.chartTitle}>Board Temp vs Lidar Out</h3>
+                {loading ? (
+                  <EmptyChartState label="Loading chart..." />
+                ) : (
+                  <ScatterChart
+                    points={boardTempVsLidarOut}
+                    xKey="board_temperature"
+                    yKey="sensor_value"
+                    xLabel="board_temperature"
+                    yLabel="lidar_out_cm"
+                    selectedId={drilldown.rowId}
+                    onSelect={(id, timestamp) =>
+                      openTableWithDrilldown({
+                        rowId: id,
+                        bucketTimestamp: timestamp ? bucketTimestampString(timestamp, appliedFilters.bucket) : null,
+                        directionView: null,
+                        isRaining: null,
+                      })
+                    }
+                  />
+                )}
+              </article>
+
+              <article style={styles.chartCardWide}>
+                <h3 style={styles.chartTitle}>Correlation Matrix (Phase 2)</h3>
+                {loading ? <EmptyChartState label="Loading matrix..." /> : <CorrelationHeatmap matrix={data?.correlation_matrix || null} />}
+              </article>
+
+              <article style={styles.chartCard}>
+                <h3 style={styles.chartTitle}>Sensor Baseline Thresholds (Phase 2)</h3>
+                <div style={styles.breakdownStack}>
+                  <div style={styles.breakdownItem}>
+                    <span>Sensor Gap In p95</span>
+                    <strong>{formatNumber(data?.sensor_baselines.sensor_gap_in.p95 ?? null)}</strong>
+                  </div>
+                  <div style={styles.breakdownItem}>
+                    <span>Sensor Gap Out p95</span>
+                    <strong>{formatNumber(data?.sensor_baselines.sensor_gap_out.p95 ?? null)}</strong>
+                  </div>
+                  <div style={styles.breakdownItem}>
+                    <span>Occupancy Change p95</span>
+                    <strong>{formatNumber(data?.sensor_baselines.occupancy_change_abs.p95 ?? null)}</strong>
+                  </div>
+                </div>
+              </article>
+
+              <article style={styles.chartCardWide}>
+                <h3 style={styles.chartTitle}>Anomaly Flags (Phase 2)</h3>
+                {loading ? (
+                  <EmptyChartState label="Loading anomalies..." />
+                ) : (
+                  <AnomalyTable
+                    rows={data?.anomaly_flags || []}
+                    onSelect={(id, timestamp) =>
+                      openTableWithDrilldown({
+                        rowId: id,
+                        bucketTimestamp: bucketTimestampString(timestamp, appliedFilters.bucket),
+                        directionView: null,
+                        isRaining: null,
+                      })
+                    }
+                  />
+                )}
+              </article>
+            </section>
+          </>
+        ) : (
+          <section style={styles.tablePanel} ref={tableSectionRef}>
+            <section style={styles.panel}>
+              <h2 style={styles.panelTitle}>Global Filters</h2>
+              <div style={styles.filterGrid}>
+                <label style={styles.label}>
+                  Start time
+                  <input
+                    type="datetime-local"
+                    value={draftFilters.startTime}
+                    onChange={(event) => setDraftFilters((prev) => ({ ...prev, startTime: event.target.value }))}
+                    style={styles.input}
+                  />
+                </label>
+                <label style={styles.label}>
+                  End time
+                  <input
+                    type="datetime-local"
+                    value={draftFilters.endTime}
+                    onChange={(event) => setDraftFilters((prev) => ({ ...prev, endTime: event.target.value }))}
+                    style={styles.input}
+                  />
+                </label>
+                <label style={styles.label}>
+                  Time bucket
+                  <select
+                    value={draftFilters.bucket}
+                    onChange={(event) =>
+                      setDraftFilters((prev) => ({ ...prev, bucket: event.target.value as Bucket }))
+                    }
+                    style={styles.input}
+                  >
+                    <option value="minute">Minute</option>
+                    <option value="hour">Hour</option>
+                    <option value="day">Day</option>
+                  </select>
+                </label>
+                <label style={styles.label}>
+                  Direction view
+                  <select
+                    value={draftFilters.directionView}
+                    onChange={(event) =>
+                      setDraftFilters((prev) => ({
+                        ...prev,
+                        directionView: event.target.value as DirectionViewFilter,
+                      }))
+                    }
+                    style={styles.input}
+                  >
+                    <option value="ALL">All</option>
+                    <option value="IN">IN</option>
+                    <option value="OUT">OUT</option>
+                    <option value="FLAT">FLAT</option>
+                  </select>
+                </label>
+                <label style={styles.label}>
+                  Rain filter
+                  <select
+                    value={draftFilters.rainFilter}
+                    onChange={(event) =>
+                      setDraftFilters((prev) => ({ ...prev, rainFilter: event.target.value as RainFilter }))
+                    }
+                    style={styles.input}
+                  >
+                    <option value="ALL">All</option>
+                    <option value="RAIN">Rain only</option>
+                    <option value="DRY">Dry only</option>
+                  </select>
+                </label>
+                <label style={styles.label}>
+                  Search by ID
+                  <input
+                    type="text"
+                    value={draftFilters.searchId}
+                    onChange={(event) => setDraftFilters((prev) => ({ ...prev, searchId: event.target.value }))}
+                    placeholder="e.g. 1205"
+                    style={styles.input}
+                  />
+                </label>
+                <label style={styles.label}>
+                  Board temp min
+                  <input
+                    type="number"
+                    value={draftFilters.boardTempMin}
+                    onChange={(event) => setDraftFilters((prev) => ({ ...prev, boardTempMin: event.target.value }))}
+                    style={styles.input}
+                  />
+                </label>
+                <label style={styles.label}>
+                  Board temp max
+                  <input
+                    type="number"
+                    value={draftFilters.boardTempMax}
+                    onChange={(event) => setDraftFilters((prev) => ({ ...prev, boardTempMax: event.target.value }))}
+                    style={styles.input}
+                  />
+                </label>
+                <label style={styles.label}>
+                  Ultrasonic in min
+                  <input
+                    type="number"
+                    value={draftFilters.ultrasonicInMin}
+                    onChange={(event) =>
+                      setDraftFilters((prev) => ({ ...prev, ultrasonicInMin: event.target.value }))
+                    }
+                    style={styles.input}
+                  />
+                </label>
+                <label style={styles.label}>
+                  Ultrasonic in max
+                  <input
+                    type="number"
+                    value={draftFilters.ultrasonicInMax}
+                    onChange={(event) =>
+                      setDraftFilters((prev) => ({ ...prev, ultrasonicInMax: event.target.value }))
+                    }
+                    style={styles.input}
+                  />
+                </label>
+                <label style={styles.label}>
+                  Ultrasonic out min
+                  <input
+                    type="number"
+                    value={draftFilters.ultrasonicOutMin}
+                    onChange={(event) =>
+                      setDraftFilters((prev) => ({ ...prev, ultrasonicOutMin: event.target.value }))
+                    }
+                    style={styles.input}
+                  />
+                </label>
+                <label style={styles.label}>
+                  Ultrasonic out max
+                  <input
+                    type="number"
+                    value={draftFilters.ultrasonicOutMax}
+                    onChange={(event) =>
+                      setDraftFilters((prev) => ({ ...prev, ultrasonicOutMax: event.target.value }))
+                    }
+                    style={styles.input}
+                  />
+                </label>
+                <label style={styles.label}>
+                  Lidar in min
+                  <input
+                    type="number"
+                    value={draftFilters.lidarInMin}
+                    onChange={(event) => setDraftFilters((prev) => ({ ...prev, lidarInMin: event.target.value }))}
+                    style={styles.input}
+                  />
+                </label>
+                <label style={styles.label}>
+                  Lidar in max
+                  <input
+                    type="number"
+                    value={draftFilters.lidarInMax}
+                    onChange={(event) => setDraftFilters((prev) => ({ ...prev, lidarInMax: event.target.value }))}
+                    style={styles.input}
+                  />
+                </label>
+                <label style={styles.label}>
+                  Lidar out min
+                  <input
+                    type="number"
+                    value={draftFilters.lidarOutMin}
+                    onChange={(event) => setDraftFilters((prev) => ({ ...prev, lidarOutMin: event.target.value }))}
+                    style={styles.input}
+                  />
+                </label>
+                <label style={styles.label}>
+                  Lidar out max
+                  <input
+                    type="number"
+                    value={draftFilters.lidarOutMax}
+                    onChange={(event) => setDraftFilters((prev) => ({ ...prev, lidarOutMax: event.target.value }))}
+                    style={styles.input}
+                  />
+                </label>
+              </div>
+
+              <div style={styles.actionRow}>
+                <button
+                  type="button"
+                  style={styles.applyButton}
+                  onClick={() => {
+                    setAppliedFilters({ ...draftFilters, limit: 5000, offset: 0 })
+                    setDrilldown({ bucketTimestamp: null, directionView: null, isRaining: null, rowId: null })
+                    setTablePage(0)
+                  }}
+                  disabled={loading}
+                >
+                  {loading ? 'Loading...' : 'Apply filters'}
+                </button>
+                <button
+                  type="button"
+                  style={styles.resetButton}
+                  onClick={() => {
+                    setDraftFilters(INITIAL_FILTERS)
+                    setAppliedFilters(INITIAL_FILTERS)
+                    setDrilldown({ bucketTimestamp: null, directionView: null, isRaining: null, rowId: null })
+                    setTablePage(0)
+                  }}
+                >
+                  Reset
+                </button>
+                <button
+                  type="button"
+                  style={styles.exportButton}
+                  onClick={() => exportCsv(tablePageRows)}
+                  disabled={tablePageRows.length === 0}
+                >
+                  Export this page
+                </button>
+                <button
+                  type="button"
+                  style={styles.resetButton}
+                  onClick={() => exportPresetReport('daily')}
+                  disabled={reportLoading !== null}
+                >
+                  {reportLoading === 'daily' ? 'Exporting daily...' : 'Export daily report'}
+                </button>
+                <button
+                  type="button"
+                  style={styles.resetButton}
+                  onClick={() => exportPresetReport('weekly')}
+                  disabled={reportLoading !== null}
+                >
+                  {reportLoading === 'weekly' ? 'Exporting weekly...' : 'Export weekly report'}
+                </button>
+              </div>
+            </section>
+
+            <p style={styles.modeBadge}>FULL TABLE MODE</p>
+            <h2 style={styles.panelTitle}>Full parking_logs Table</h2>
+            <p style={styles.tableNote}>
+              Includes all 23 parking_logs columns plus derived metrics. Click any chart point to apply drilldown filters.
+            </p>
+            <div style={styles.actionRow}>
+              <button
+                type="button"
+                style={styles.resetButton}
+                onClick={() =>
+                  setDrilldown({ bucketTimestamp: null, directionView: null, isRaining: null, rowId: null })
+                }
+              >
+                Clear drilldown
+              </button>
+              <button
+                type="button"
+                style={styles.applyButton}
+                onClick={() => setDrilldown((prev) => ({ ...prev, directionView: 'OUT', rowId: null }))}
+              >
+                Show OUT only
+              </button>
+              <button
+                type="button"
+                style={styles.applyButton}
+                onClick={() => setDrilldown((prev) => ({ ...prev, directionView: 'IN', rowId: null }))}
+              >
+                Show IN only
+              </button>
             </div>
-          ) : null}
-          <EventTable rows={tableEvents} />
-        </section>
+            {drilldownChips.length > 0 ? (
+              <div style={styles.chipRow}>
+                {drilldownChips.map((chip) => (
+                  <span key={chip} style={styles.chip}>
+                    {chip}
+                  </span>
+                ))}
+              </div>
+            ) : null}
+            <div style={styles.paginationRow}>
+              <span style={styles.paginationText}>
+                {tableRows.length > 0
+                  ? `Showing ${tableStartRow}-${tableEndRow} of ${tableRows.length} rows`
+                  : 'No rows'}
+              </span>
+              <div style={styles.paginationButtons}>
+                <button
+                  type="button"
+                  style={styles.pageButton}
+                  onClick={() => setTablePage(0)}
+                  disabled={currentTablePage === 0 || tableRows.length === 0}
+                >
+                  {'<<'}
+                </button>
+                <button
+                  type="button"
+                  style={styles.pageButton}
+                  onClick={() => setTablePage((prev) => Math.max(prev - 1, 0))}
+                  disabled={currentTablePage === 0 || tableRows.length === 0}
+                >
+                  {'<'}
+                </button>
+                <span style={styles.paginationText}>Page {currentTablePage + 1} / {totalTablePages}</span>
+                <button
+                  type="button"
+                  style={styles.pageButton}
+                  onClick={() => setTablePage((prev) => Math.min(prev + 1, totalTablePages - 1))}
+                  disabled={currentTablePage >= totalTablePages - 1 || tableRows.length === 0}
+                >
+                  {'>'}
+                </button>
+                <button
+                  type="button"
+                  style={styles.pageButton}
+                  onClick={() => setTablePage(totalTablePages - 1)}
+                  disabled={currentTablePage >= totalTablePages - 1 || tableRows.length === 0}
+                >
+                  {'>>'}
+                </button>
+              </div>
+            </div>
+            <DataTable rows={tablePageRows} />
+          </section>
+        )}
       </section>
     </main>
   )
@@ -887,71 +1742,92 @@ export default function Home(): React.ReactElement {
 const styles: Record<string, React.CSSProperties> = {
   page: {
     minHeight: '100vh',
-    background: 'linear-gradient(125deg, #f6eee3 0%, #f1e1c6 35%, #e8cfa8 100%)',
+    background: 'linear-gradient(140deg, #f8f2e7 0%, #efe2cf 45%, #f3ecd9 100%)',
     position: 'relative',
     overflow: 'hidden',
   },
-  heroBackdrop: {
+  heroBlob: {
     position: 'absolute',
-    top: -180,
+    top: -160,
     right: -120,
-    width: 560,
-    height: 560,
+    width: 580,
+    height: 580,
     borderRadius: '50%',
-    background: 'radial-gradient(circle at center, rgba(219,90,66,0.22), rgba(219,90,66,0))',
+    background: 'radial-gradient(circle at center, rgba(217,119,6,0.22), rgba(217,119,6,0))',
     pointerEvents: 'none',
   },
   container: {
-    width: 'min(1240px, 92vw)',
+    width: 'min(1320px, 94vw)',
     margin: '0 auto',
-    padding: '28px 0 64px 0',
+    padding: '28px 0 56px 0',
     position: 'relative',
     zIndex: 1,
   },
   header: {
-    display: 'flex',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    gap: '16px',
-    flexWrap: 'wrap',
-    marginBottom: '18px',
+    marginBottom: '14px',
   },
   eyebrow: {
     margin: 0,
-    fontSize: '0.82rem',
-    letterSpacing: '0.1em',
     textTransform: 'uppercase',
-    color: '#6f4e37',
+    letterSpacing: '0.08em',
+    fontSize: '0.79rem',
+    color: '#7c4b1f',
     fontWeight: 700,
   },
   title: {
     margin: '8px 0 10px 0',
-    color: '#1d3124',
-    fontSize: 'clamp(1.8rem, 3.8vw, 3rem)',
+    color: '#1e2f23',
+    fontSize: 'clamp(1.7rem, 3.8vw, 3rem)',
     lineHeight: 1.05,
   },
   subtitle: {
     margin: 0,
-    color: '#3e2f1f',
-    maxWidth: '740px',
+    maxWidth: '860px',
+    color: '#433221',
     lineHeight: 1.45,
   },
+  sourceText: {
+    margin: '8px 0 0 0',
+    color: '#4f4234',
+    fontSize: '0.82rem',
+    fontWeight: 700,
+  },
+  tabRow: {
+    display: 'flex',
+    gap: '8px',
+    flexWrap: 'wrap',
+    marginBottom: '12px',
+  },
+  tabButton: {
+    border: '1px solid #c79e70',
+    borderRadius: '999px',
+    padding: '8px 14px',
+    background: '#fff7eb',
+    color: '#6f3f12',
+    fontWeight: 700,
+    cursor: 'pointer',
+  },
+  tabButtonActive: {
+    border: '1px solid #173d31',
+    background: '#173d31',
+    color: '#fff',
+  },
   panel: {
-    background: 'rgba(255, 248, 238, 0.9)',
-    border: '1px solid rgba(111,78,55,0.22)',
+    background: 'rgba(255, 250, 242, 0.92)',
+    border: '1px solid rgba(122, 80, 40, 0.22)',
     borderRadius: '16px',
     padding: '16px',
+    boxShadow: '0 8px 24px rgba(70, 45, 22, 0.1)',
     marginBottom: '14px',
-    boxShadow: '0 10px 40px rgba(46,38,26,0.08)',
   },
   panelTitle: {
-    margin: '0 0 12px 0',
-    color: '#1d3124',
-    fontSize: '1.1rem',
+    margin: '0 0 10px 0',
+    color: '#173d31',
+    fontSize: '1.08rem',
   },
   filterGrid: {
     display: 'grid',
-    gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(165px, 1fr))',
     gap: '10px',
   },
   label: {
@@ -959,18 +1835,18 @@ const styles: Record<string, React.CSSProperties> = {
     flexDirection: 'column',
     gap: '6px',
     fontSize: '0.78rem',
-    color: '#3e2f1f',
+    color: '#3f2e1e',
     fontWeight: 700,
   },
   input: {
-    border: '1px solid #d4b98f',
+    border: '1px solid #d9b88d',
     borderRadius: '10px',
-    padding: '10px 11px',
-    background: '#fffdf8',
+    padding: '9px 10px',
+    background: '#fffefa',
+    color: '#2e241b',
     fontSize: '0.9rem',
-    color: '#2a2118',
   },
-  filterActionRow: {
+  actionRow: {
     marginTop: '12px',
     display: 'flex',
     gap: '8px',
@@ -979,17 +1855,17 @@ const styles: Record<string, React.CSSProperties> = {
   applyButton: {
     border: 'none',
     borderRadius: '10px',
-    background: '#1d3124',
+    background: '#173d31',
     color: '#fff',
     fontWeight: 700,
     padding: '10px 14px',
     cursor: 'pointer',
   },
   resetButton: {
-    border: '1px solid #b98f69',
+    border: '1px solid #c79e70',
     borderRadius: '10px',
-    background: '#fff4e8',
-    color: '#59361a',
+    background: '#fff3e1',
+    color: '#6f3f12',
     fontWeight: 700,
     padding: '10px 14px',
     cursor: 'pointer',
@@ -997,71 +1873,70 @@ const styles: Record<string, React.CSSProperties> = {
   exportButton: {
     border: 'none',
     borderRadius: '10px',
-    background: '#db5a42',
+    background: '#d9480f',
     color: '#fff',
     fontWeight: 700,
     padding: '10px 14px',
     cursor: 'pointer',
   },
   errorBox: {
-    background: '#fee2e2',
+    background: '#fde2e1',
     border: '1px solid #ef4444',
+    borderRadius: '12px',
     color: '#7f1d1d',
     padding: '12px',
-    borderRadius: '12px',
     marginBottom: '12px',
   },
   kpiGrid: {
     display: 'grid',
-    gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(172px, 1fr))',
     gap: '10px',
     marginBottom: '14px',
   },
   kpiCard: {
-    background: 'rgba(255, 252, 246, 0.95)',
-    border: '1px solid rgba(111,78,55,0.2)',
+    background: '#fffdf7',
+    border: '1px solid rgba(111, 78, 55, 0.2)',
     borderRadius: '14px',
     padding: '12px 14px',
   },
   kpiTitle: {
     margin: 0,
     color: '#6f4e37',
-    fontSize: '0.8rem',
+    fontSize: '0.77rem',
     textTransform: 'uppercase',
     letterSpacing: '0.06em',
     fontWeight: 700,
   },
   kpiValue: {
     margin: '8px 0 0 0',
-    color: '#1d3124',
-    fontSize: '1.35rem',
+    color: '#163a31',
     fontWeight: 700,
-    lineHeight: 1.1,
+    fontSize: '1.24rem',
   },
   chartGrid: {
     display: 'grid',
-    gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))',
     gap: '10px',
     marginBottom: '14px',
   },
   chartCard: {
-    background: '#fffbf4',
-    border: '1px solid rgba(111,78,55,0.2)',
+    background: '#fffdf8',
+    border: '1px solid rgba(111, 78, 55, 0.2)',
     borderRadius: '14px',
     padding: '12px',
-    minHeight: '280px',
+    minHeight: '290px',
   },
   chartCardWide: {
-    gridColumn: 'span 2',
-    background: '#fffbf4',
-    border: '1px solid rgba(111,78,55,0.2)',
+    gridColumn: '1 / -1',
+    background: '#fffdf8',
+    border: '1px solid rgba(111, 78, 55, 0.2)',
     borderRadius: '14px',
     padding: '12px',
   },
   chartTitle: {
     margin: '0 0 10px 0',
-    color: '#1d3124',
-    fontSize: '1rem',
+    color: '#163a31',
+    fontSize: '0.99rem',
   },
   chartWrap: {
     width: '100%',
@@ -1071,13 +1946,24 @@ const styles: Record<string, React.CSSProperties> = {
     height: '220px',
     display: 'block',
   },
+  emptyState: {
+    minHeight: '150px',
+    border: '1px dashed #cfb08b',
+    borderRadius: '12px',
+    background: '#fff8ed',
+    color: '#7b5f44',
+    display: 'flex',
+    justifyContent: 'center',
+    alignItems: 'center',
+    fontWeight: 700,
+  },
   legendRow: {
     display: 'flex',
     gap: '12px',
-    alignItems: 'center',
     flexWrap: 'wrap',
+    alignItems: 'center',
+    color: '#4a3a2b',
     marginTop: '8px',
-    color: '#3e2f1f',
     fontSize: '0.82rem',
   },
   legendItem: {
@@ -1091,139 +1977,165 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: '50%',
     display: 'inline-block',
   },
-  stackedContainer: {
-    display: 'flex',
-    alignItems: 'flex-end',
-    gap: '2px',
-    minHeight: '210px',
-    borderBottom: '1px solid #8a6f52',
-    borderLeft: '1px solid #8a6f52',
-    padding: '6px 4px 10px 6px',
-    overflow: 'hidden',
+  rainGrid: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+    gap: '8px',
   },
-  stackedBar: {
-    display: 'flex',
-    flexDirection: 'column',
-    justifyContent: 'flex-end',
-    alignItems: 'stretch',
-    height: '100%',
-    minWidth: '4px',
-  },
-  stackedSegmentButton: {
-    border: 'none',
-    padding: 0,
-    width: '100%',
+  rainCard: {
+    border: '1px solid #d3b48e',
+    borderRadius: '12px',
+    background: '#fff8ef',
+    textAlign: 'left',
     cursor: 'pointer',
-    minHeight: '3px',
+    padding: '12px',
   },
-  countedSegment: {
-    background: '#2a9d8f',
-    width: '100%',
+  rainTitle: {
+    margin: 0,
+    color: '#6a4a2d',
+    fontSize: '0.82rem',
+    fontWeight: 700,
   },
-  uncountedSegment: {
-    background: '#e76f51',
-    width: '100%',
+  rainValue: {
+    margin: '6px 0',
+    color: '#173d31',
+    fontSize: '1.34rem',
+    fontWeight: 700,
   },
-  breakdownList: {
+  rainSub: {
+    margin: 0,
+    color: '#4a3726',
+    fontSize: '0.84rem',
+  },
+  breakdownStack: {
     display: 'flex',
     flexDirection: 'column',
-    gap: '10px',
+    gap: '8px',
   },
   breakdownItem: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: '6px',
-  },
-  breakdownLabelRow: {
+    border: '1px solid #d3b48e',
+    borderRadius: '10px',
+    background: '#fff8ef',
+    color: '#2e241b',
     display: 'flex',
     justifyContent: 'space-between',
-    fontSize: '0.86rem',
-  },
-  breakdownLabel: {
-    color: '#1d3124',
-    fontWeight: 700,
-  },
-  breakdownValue: {
-    color: '#59361a',
-  },
-  breakdownTrack: {
-    width: '100%',
-    height: '14px',
-    background: '#f2e6d4',
-    borderRadius: '100px',
-    overflow: 'hidden',
-  },
-  breakdownBar: {
-    height: '100%',
-  },
-  emptyState: {
-    border: '1px dashed #c7ac8b',
-    borderRadius: '12px',
-    background: '#fff8ed',
-    color: '#7e6043',
-    minHeight: '150px',
-    display: 'flex',
     alignItems: 'center',
-    justifyContent: 'center',
-    fontWeight: 700,
+    padding: '9px 10px',
+    cursor: 'pointer',
   },
   tablePanel: {
-    background: '#fffbf4',
-    border: '1px solid rgba(111,78,55,0.2)',
+    background: '#fffdf8',
+    border: '1px solid rgba(111, 78, 55, 0.2)',
     borderRadius: '14px',
     padding: '12px',
   },
+  modeBadge: {
+    margin: '0 0 6px 0',
+    color: '#7a4b1d',
+    fontSize: '0.75rem',
+    fontWeight: 700,
+    letterSpacing: '0.08em',
+    textTransform: 'uppercase',
+  },
   tableNote: {
     margin: '0 0 8px 0',
-    color: '#62462c',
-    fontSize: '0.85rem',
+    color: '#5c4633',
+    fontSize: '0.84rem',
   },
-  drilldownActionRow: {
+  chipRow: {
     display: 'flex',
-    gap: '8px',
     flexWrap: 'wrap',
-    marginBottom: '8px',
-  },
-  drilldownChipRow: {
-    display: 'flex',
     gap: '8px',
-    flexWrap: 'wrap',
-    marginBottom: '8px',
+    marginBottom: '10px',
   },
-  drilldownChip: {
-    background: '#f2e6d4',
-    border: '1px solid #d4b98f',
-    color: '#3e2f1f',
+  chip: {
     borderRadius: '999px',
+    border: '1px solid #d3b48e',
+    background: '#f7e9d5',
+    color: '#3f2e1e',
     padding: '5px 10px',
     fontSize: '0.8rem',
     fontWeight: 700,
+  },
+  paginationRow: {
+    marginBottom: '10px',
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: '8px',
+    flexWrap: 'wrap',
+  },
+  paginationText: {
+    fontSize: '0.84rem',
+    color: '#5c4633',
+    fontWeight: 700,
+  },
+  paginationButtons: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '6px',
+  },
+  pageButton: {
+    border: '1px solid #d3b48e',
+    borderRadius: '8px',
+    background: '#fff8ef',
+    color: '#3f2e1e',
+    fontWeight: 700,
+    fontSize: '0.86rem',
+    padding: '6px 10px',
+    cursor: 'pointer',
   },
   tableWrap: {
     width: '100%',
     overflowX: 'auto',
   },
-  table: {
+  heatmapWrap: {
     width: '100%',
+    overflowX: 'auto',
+  },
+  heatmapTable: {
     borderCollapse: 'collapse',
     minWidth: '980px',
+    width: '100%',
+  },
+  heatmapHeaderCell: {
+    border: '1px solid #dbbf98',
+    padding: '6px 8px',
+    background: '#f8ead6',
+    color: '#2d2217',
+    fontSize: '0.76rem',
+    textAlign: 'left',
+    whiteSpace: 'nowrap',
+  },
+  heatmapCell: {
+    border: '1px solid #dbbf98',
+    padding: '6px 8px',
+    color: '#fff',
+    fontSize: '0.75rem',
+    textAlign: 'center',
+    whiteSpace: 'nowrap',
+    fontWeight: 700,
+  },
+  table: {
+    width: '100%',
+    minWidth: '1800px',
+    borderCollapse: 'collapse',
   },
   th: {
     textAlign: 'left',
-    borderBottom: '1px solid #d5b793',
-    color: '#2c2114',
-    fontWeight: 700,
     padding: '10px 8px',
-    fontSize: '0.84rem',
-    background: '#f7ead8',
+    borderBottom: '1px solid #dbbf98',
+    background: '#f8ead6',
+    color: '#2d2217',
+    fontSize: '0.82rem',
     position: 'sticky',
     top: 0,
   },
   td: {
-    borderBottom: '1px solid #ebd9c2',
-    color: '#2f2418',
-    padding: '9px 8px',
-    fontSize: '0.82rem',
+    padding: '8px',
+    borderBottom: '1px solid #eedcc7',
+    color: '#302519',
+    fontSize: '0.8rem',
     whiteSpace: 'nowrap',
   },
 }
