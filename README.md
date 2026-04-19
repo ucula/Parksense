@@ -8,9 +8,9 @@
   <p align="center">
     Intelligent car parking availability monitoring system using IoT sensors and machine learning
     <br />
-    <a href=https://docs.google.com/document/d/1GHHl_l5Vo-CsSAlA_s1dFEQFTqM1IijSv1jyiw_WpEk/edit?tab=t.0><strong>Explore the docs »</strong></a>
+    <a href="https://docs.google.com/document/d/1GHHl_l5Vo-CsSAlA_s1dFEQFTqM1IijSv1jyiw_WpEk/edit?tab=t.0"><strong>Explore the docs »</strong></a>
     <br />
-    <a href=https://docs.google.com/document/d/1ahNNu1b3PGR8sIsEEBoCvRBRc65DTKKkgZlgHrcnEi8/edit?tab=t.0><strong>IoT sensor setup guide »</strong></a>
+    <a href="https://docs.google.com/document/d/1ahNNu1b3PGR8sIsEEBoCvRBRc65DTKKkgZlgHrcnEi8/edit?tab=t.0"><strong>IoT sensor setup guide »</strong></a>
     <br />
     <br />
 
@@ -84,7 +84,7 @@ This repository focuses on visualizing processed data and serving it through the
 
 For end-to-end IoT deployment details (sensor hardware setup, microcontroller configuration, calibration, and data collection flow), follow the dedicated guide:
 
-- https://docs.google.com/document/d/1ahNNu1b3PGR8sIsEEBoCvRBRc65DTKKkgZlgHrcnEi8/edit?tab=t.0
+[IoT sensor setup guide »](https://docs.google.com/document/d/1ahNNu1b3PGR8sIsEEBoCvRBRc65DTKKkgZlgHrcnEi8/edit?tab=t.0)
 
 ### Installation
 
