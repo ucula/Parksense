@@ -107,7 +107,7 @@ export default function DatabasePage() {
         // Fetch one extra row to determine whether a next page exists.
         const offset = currentPage * PAGE_SIZE;
         const response = await fetch(
-          `${API_BASE_URL}/api/parkinglogs?limit=${PAGE_SIZE + 1}&offset=${offset}`,
+          `${API_BASE_URL}/api/parkinglogs?limit=${PAGE_SIZE + 1}&offset=${offset}&sort=asc`,
         );
         if (!response.ok) {
           throw new Error(`Failed to fetch parking logs: ${response.statusText}`);

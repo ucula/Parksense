@@ -376,8 +376,8 @@ function buildReportUrl(filters: Filters, preset: 'daily' | 'weekly'): string {
 function buildDashboardUrl(filters: Filters): string {
   const params = new URLSearchParams()
   params.set('bucket', filters.bucket)
-  params.set('limit', String(filters.limit))
   params.set('offset', String(filters.offset))
+  params.set('sort', 'asc')
 
   const start = formatDateInput(filters.startTime)
   const end = formatDateInput(filters.endTime)
