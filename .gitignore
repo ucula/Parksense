@@ -67,3 +67,8 @@ htmlcov/
 .dockerignore
 
 docs/
+
+# Claude
+
+skills/
+CLAUDE.md
