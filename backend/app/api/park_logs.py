@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from fastapi import APIRouter, Query
 
 from app.services import park_logs_service
+from app.services import prediction as prediction_service
 
 
 router = APIRouter(prefix="/api")
@@ -221,6 +222,21 @@ async def get_park_logs_dashboard(
         pattern="^(asc|desc)$",
         description="Sort order for logs table",
     ),
+    anomaly_gap_in: float | None = Query(
+        default=None,
+        ge=0,
+        description="Override sensor_gap_in threshold for anomaly detection",
+    ),
+    anomaly_gap_out: float | None = Query(
+        default=None,
+        ge=0,
+        description="Override sensor_gap_out threshold for anomaly detection",
+    ),
+    anomaly_occ_change: float | None = Query(
+        default=None,
+        ge=0,
+        description="Override occupancy_change threshold for anomaly detection",
+    ),
 ):
     logs, source = park_logs_service.get_log_source()
 
@@ -275,6 +291,15 @@ async def get_park_logs_dashboard(
     ][:1500]
 
     sensor_baselines = park_logs_service.build_sensor_baselines(derived_logs_desc)
+
+    # Allow caller to override computed p95 thresholds
+    if anomaly_gap_in is not None:
+        sensor_baselines["sensor_gap_in"]["p95"] = anomaly_gap_in
+    if anomaly_gap_out is not None:
+        sensor_baselines["sensor_gap_out"]["p95"] = anomaly_gap_out
+    if anomaly_occ_change is not None:
+        sensor_baselines["occupancy_change_abs"]["p95"] = anomaly_occ_change
+
     anomaly_flags = park_logs_service.build_anomaly_flags(derived_logs_desc, sensor_baselines)
     correlation_matrix = park_logs_service.build_correlation_matrix(derived_logs_desc)
 
@@ -346,3 +371,30 @@ async def get_park_logs_dashboard(
         "total_filtered_logs": total_logs,
         "returned_logs": len(paginated_logs),
     }
+
+
+@router.get("/park-logs/analytics")
+async def get_park_logs_analytics():
+    """Return ML prediction, heatmap, daily summary, day-of-week stats, temp buckets."""
+    logs, _ = park_logs_service.get_log_source()
+    derived_asc = park_logs_service.with_derived_metrics(logs)
+    derived_asc_sorted = sorted(derived_asc, key=lambda r: r["timestamp"])
+
+    pred_result = None
+    if derived_asc_sorted:
+        pred_result = prediction_service.predict_30min(derived_asc_sorted, len(derived_asc_sorted) - 1)
+
+    return {
+        "prediction": pred_result,
+        "heatmap": park_logs_service.build_heatmap(derived_asc_sorted),
+        "daily_summary": park_logs_service.build_daily_summary(derived_asc_sorted, days=7),
+        "day_of_week": park_logs_service.build_day_of_week_stats(derived_asc_sorted),
+        "temp_buckets": park_logs_service.build_temp_buckets(derived_asc_sorted),
+    }
+
+
+@router.get("/park-logs/sensor-health")
+async def get_sensor_health():
+    """Return sensor health scorecard for the 4 distance sensors."""
+    logs, _ = park_logs_service.get_log_source()
+    return park_logs_service.build_sensor_health(logs)

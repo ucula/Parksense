@@ -1,7 +1,7 @@
 import csv
 import math
 import os
-from datetime import datetime
+from datetime import datetime, date
 from typing import Any
 
 from fastapi import HTTPException
@@ -663,7 +663,9 @@ def _build_anomaly_flags(
                 "severity": severity,
                 "reasons": reasons,
                 "direction_view": row["direction_view"],
+                "direction": row["direction_view"],
                 "current_vehicles": row["current_vehicles"],
+                "parking_percentage": row.get("parking_percentage"),
                 "net_flow": row["net_flow"],
                 "sensor_gap_in": row["sensor_gap_in"],
                 "sensor_gap_out": row["sensor_gap_out"],
@@ -818,3 +820,149 @@ def build_anomaly_flags(
 
 def build_report_rows(logs_descending: list[dict[str, Any]], preset: str) -> list[dict[str, Any]]:
     return _build_report_rows(logs_descending, preset)
+
+
+# ──────────────────────────────────────────────────
+# Analytics helpers
+# ──────────────────────────────────────────────────
+
+_DAY_ORDER = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+
+def build_heatmap(logs: list[dict[str, Any]]) -> dict[str, Any]:
+    """Day × Hour heatmap of avg parking_percentage."""
+    cells: dict[str, dict[int, dict[str, float]]] = {d: {} for d in _DAY_ORDER}
+
+    for row in logs:
+        ts = row["timestamp"]
+        day_name = ts.strftime("%A")
+        hour = ts.hour
+        pct = row["parking_percentage"]
+        if pct is None or day_name not in cells:
+            continue
+        if hour not in cells[day_name]:
+            cells[day_name][hour] = {"sum": 0.0, "count": 0}
+        cells[day_name][hour]["sum"] += pct
+        cells[day_name][hour]["count"] += 1
+
+    result = []
+    for day in _DAY_ORDER:
+        for hour in range(24):
+            cell = cells[day].get(hour, {"sum": 0.0, "count": 0})
+            avg_pct = round(cell["sum"] / cell["count"], 2) if cell["count"] > 0 else None
+            result.append({"day": day, "hour": hour, "avg_pct": avg_pct, "count": cell["count"]})
+
+    return {"cells": result, "days": _DAY_ORDER, "hours": list(range(24))}
+
+
+def build_daily_summary(logs: list[dict[str, Any]], days: int = 7) -> list[dict[str, Any]]:
+    """Last N calendar days: avg%, max%, total IN/OUT, 24-point sparkline."""
+    daily: dict[date, dict] = {}
+
+    for row in logs:
+        d = row["timestamp"].date()
+        if d not in daily:
+            daily[d] = {"pct_values": [], "in_total": 0, "out_total": 0, "hourly": {}}
+        pct = row["parking_percentage"]
+        if pct is not None:
+            daily[d]["pct_values"].append(pct)
+        daily[d]["in_total"] += row["in_count"]
+        daily[d]["out_total"] += row["out_count"]
+        hr = row["timestamp"].hour
+        if hr not in daily[d]["hourly"]:
+            daily[d]["hourly"][hr] = []
+        if pct is not None:
+            daily[d]["hourly"][hr].append(pct)
+
+    sorted_dates = sorted(daily.keys(), reverse=True)[:days]
+    result = []
+    for d in sorted_dates:
+        info = daily[d]
+        pct_vals = info["pct_values"]
+        avg_pct = round(sum(pct_vals) / len(pct_vals), 2) if pct_vals else None
+        max_pct = round(max(pct_vals), 2) if pct_vals else None
+        sparkline = []
+        for hr in range(24):
+            hr_vals = info["hourly"].get(hr, [])
+            sparkline.append(round(sum(hr_vals) / len(hr_vals), 2) if hr_vals else None)
+        result.append({
+            "date": d.isoformat(),
+            "avg_pct": avg_pct,
+            "max_pct": max_pct,
+            "total_in": info["in_total"],
+            "total_out": info["out_total"],
+            "sparkline": sparkline,
+        })
+    return result
+
+
+def build_sensor_health(logs: list[dict[str, Any]]) -> dict[str, Any]:
+    """Sensor active-rate scorecard for 4 sensor columns."""
+    total = len(logs)
+    if total == 0:
+        return {}
+
+    sensors = {
+        "Ultrasonic In": "ultrasonic_in_cm",
+        "Ultrasonic Out": "ultrasonic_out_cm",
+        "Lidar In": "lidar_in_cm",
+        "Lidar Out": "lidar_out_cm",
+    }
+
+    result: dict[str, Any] = {}
+    for name, col in sensors.items():
+        active_vals = [row[col] for row in logs if row.get(col) is not None and (row[col] or 0) > 0]
+        active_rate = round(len(active_vals) / total * 100, 1)
+        avg_when_active = round(sum(active_vals) / len(active_vals), 2) if active_vals else None
+        status = "OK" if active_rate > 50 else ("WARN" if active_rate > 20 else "CRITICAL")
+        result[name] = {"active_rate": active_rate, "avg_when_active": avg_when_active, "status": status}
+    return result
+
+
+def build_day_of_week_stats(logs: list[dict[str, Any]]) -> dict[str, Any]:
+    """Avg parking_percentage per day-of-week, Mon–Sun."""
+    buckets: dict[str, list[float]] = {d: [] for d in _DAY_ORDER}
+    for row in logs:
+        day_name = row["timestamp"].strftime("%A")
+        pct = row["parking_percentage"]
+        if pct is not None and day_name in buckets:
+            buckets[day_name].append(pct)
+
+    all_pcts = [p for vals in buckets.values() for p in vals]
+    overall_avg = round(sum(all_pcts) / len(all_pcts), 2) if all_pcts else None
+
+    days_result = []
+    for day in _DAY_ORDER:
+        vals = buckets[day]
+        avg_pct = round(sum(vals) / len(vals), 2) if vals else None
+        days_result.append({"day": day, "avg_pct": avg_pct, "count": len(vals)})
+
+    return {"days": days_result, "overall_avg": overall_avg}
+
+
+def build_temp_buckets(logs: list[dict[str, Any]], bucket_size: float = 2.0) -> list[dict[str, Any]]:
+    """Avg parking_percentage per 2°C temperature bucket with std and count."""
+    bucket_data: dict[float, list[float]] = {}
+    for row in logs:
+        temp = row.get("api_temperature")
+        pct = row.get("parking_percentage")
+        if temp is None or pct is None:
+            continue
+        bucket_floor = math.floor(temp / bucket_size) * bucket_size
+        if bucket_floor not in bucket_data:
+            bucket_data[bucket_floor] = []
+        bucket_data[bucket_floor].append(pct)
+
+    result = []
+    for floor_temp in sorted(bucket_data.keys()):
+        vals = bucket_data[floor_temp]
+        mean = sum(vals) / len(vals)
+        variance = sum((v - mean) ** 2 for v in vals) / len(vals)
+        result.append({
+            "temp_range": f"{floor_temp:.0f}\u2013{floor_temp + bucket_size:.0f}\u00b0C",
+            "temp_floor": floor_temp,
+            "avg_pct": round(mean, 2),
+            "std": round(math.sqrt(variance), 2),
+            "count": len(vals),
+        })
+    return result
