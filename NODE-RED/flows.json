@@ -1,0 +1,194 @@
+[
+    {
+        "id": "7e1af16790ca1d59",
+        "type": "tab",
+        "label": "PIR",
+        "disabled": true,
+        "info": "",
+        "env": []
+    },
+    {
+        "id": "31d114c6ee80b8d1",
+        "type": "inject",
+        "z": "7e1af16790ca1d59",
+        "name": "Inject every 10 min",
+        "props": [
+            {
+                "p": "payload"
+            }
+        ],
+        "repeat": "600",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 220,
+        "y": 280,
+        "wires": [
+            [
+                "44fffefaa6068aa7"
+            ]
+        ]
+    },
+    {
+        "id": "44fffefaa6068aa7",
+        "type": "http request",
+        "z": "7e1af16790ca1d59",
+        "name": "Weather API",
+        "method": "GET",
+        "ret": "obj",
+        "paytoqs": "ignore",
+        "url": "https://api.openweathermap.org/data/2.5/weather?lat=13.843622576828158&lon=100.56953694263805&appid=e3b07f95950121d74417c334045dae5e&units=metric",
+        "tls": "",
+        "persist": false,
+        "proxy": "",
+        "insecureHTTPParser": false,
+        "authType": "",
+        "senderr": false,
+        "headers": [],
+        "x": 550,
+        "y": 280,
+        "wires": [
+            [
+                "sql_generator_node"
+            ]
+        ]
+    },
+    {
+        "id": "eb0af4446cff947c",
+        "type": "mqtt in",
+        "z": "7e1af16790ca1d59",
+        "name": "",
+        "topic": "b6710545768/ParksenseIn",
+        "qos": "2",
+        "datatype": "auto-detect",
+        "broker": "afa794712bb40253",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 410,
+        "y": 520,
+        "wires": [
+            [
+                "accumulator_node"
+            ]
+        ]
+    },
+    {
+        "id": "eb252c0f7b7dca73",
+        "type": "mqtt in",
+        "z": "7e1af16790ca1d59",
+        "name": "",
+        "topic": "b6710545768/ParksenseOut",
+        "qos": "2",
+        "datatype": "auto-detect",
+        "broker": "afa794712bb40253",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 420,
+        "y": 640,
+        "wires": [
+            [
+                "accumulator_node"
+            ]
+        ]
+    },
+    {
+        "id": "69afd549f0b4f44e",
+        "type": "mysql",
+        "z": "7e1af16790ca1d59",
+        "mydb": "b7456f1677146e09",
+        "name": "",
+        "x": 1160,
+        "y": 280,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "accumulator_node",
+        "type": "function",
+        "z": "7e1af16790ca1d59",
+        "name": "Counting logic and Data Transformation",
+        "func": "const VALID_DISTANCE = 150;\nconst SHARP_THRESHOLD = 25;\n\nlet accum_in = flow.get('accum_in_count') || 0;\nlet accum_out = flow.get('accum_out_count') || 0;\nlet pir_in = flow.get('accum_pir_in') || 0;\nlet pir_out = flow.get('accum_pir_out') || 0;\n\nlet sum_ultra_in = flow.get('sum_ultra_in') || 0;\nlet sum_ultra_out = flow.get('sum_ultra_out') || 0;\nlet sum_sharp_in = flow.get('sum_sharp_in') || 0;\nlet sum_sharp_out = flow.get('sum_sharp_out') || 0;\n\nlet sum_raw_ultra_in = flow.get('sum_raw_ultra_in') || 0;\nlet sum_raw_ultra_out = flow.get('sum_raw_ultra_out') || 0;\nlet sum_raw_sharp_in = flow.get('sum_raw_sharp_in') || 0;\nlet sum_raw_sharp_out = flow.get('sum_raw_sharp_out') || 0;\n\nlet b_temp = msg.payload.board_temp ?? 32.0;\n\nfunction calculateSharpCM(analog) {\n    if (analog < 50) return 30.0;\n    let voltage = (analog / 4095.0) * 3.3;\n    let cm = 12.08 * Math.pow(voltage, -1.058);\n    return (cm > 30) ? 30 : (cm < 4 ? 4 : cm);\n}\n\nfunction usToCm(us, temp) {\n    let speed_m_s = 331.3 + (0.606 * temp);\n    let speed_cm_us = speed_m_s / 10000;\n    return (us * speed_cm_us) / 2;\n}\n\nlet is_event = false;\nlet direction = \"\";\n\nlet u_us = msg.payload.ultrasonic_us ?? 0;\nlet s_raw = msg.payload.sharp_analog ?? 0;\n\nlet corrected_ultra = usToCm(u_us, b_temp);\nlet sharp_cm = calculateSharpCM(s_raw);\nlet is_counted = 0;\n\nif (msg.topic === 'b6710545768/ParksenseIn' && msg.payload.pir === 1) {\n    is_event = true;\n    direction = \"IN\";\n    pir_in += 1;\n    flow.set('last_board_temp', b_temp);\n\n    if (corrected_ultra > 2 && corrected_ultra <= VALID_DISTANCE) {\n        is_counted = 1;\n        accum_in += 1;\n        sum_ultra_in += corrected_ultra;\n        sum_sharp_in += sharp_cm;\n        sum_raw_ultra_in += u_us;\n        sum_raw_sharp_in += s_raw;\n    } else {\n        node.warn(\"IN: False Positive ดรอปทิ้ง\");\n    }\n\n}\nelse if (msg.topic === 'b6710545768/ParksenseOut' && msg.payload.pir === 1) {\n    is_event = true;\n    direction = \"OUT\";\n    pir_out += 1;\n    flow.set('last_board_temp', b_temp);\n\n    if (corrected_ultra > 2 && corrected_ultra <= VALID_DISTANCE) {\n        is_counted = 1;\n        accum_out += 1;\n        sum_ultra_out += corrected_ultra;\n        sum_sharp_out += sharp_cm;\n        sum_raw_ultra_out += u_us;\n        sum_raw_sharp_out += s_raw;\n    } else {\n        node.warn(\"OUT: False Positive ดรอปทิ้ง\");\n    }\n}\n\nflow.set('accum_in_count', accum_in);\nflow.set('accum_out_count', accum_out);\nflow.set('accum_pir_in', pir_in);\nflow.set('accum_pir_out', pir_out);\n\nflow.set('sum_ultra_in', sum_ultra_in);\nflow.set('sum_ultra_out', sum_ultra_out);\nflow.set('sum_sharp_in', sum_sharp_in);\nflow.set('sum_sharp_out', sum_sharp_out);\n\nflow.set('sum_raw_ultra_in', sum_raw_ultra_in);\nflow.set('sum_raw_ultra_out', sum_raw_ultra_out);\nflow.set('sum_raw_sharp_in', sum_raw_sharp_in);\nflow.set('sum_raw_sharp_out', sum_raw_sharp_out);\n\nif (is_event) {\n    let sql = `INSERT INTO parking_events \n    (direction, raw_ultrasonic_us, ultrasonic_cm, raw_sharp_analog, sharp_cm, board_temp, is_counted) \n    VALUES \n    ('${direction}', ${u_us}, ${corrected_ultra.toFixed(2)}, ${s_raw}, ${sharp_cm.toFixed(2)}, ${b_temp}, ${is_counted});`;\n\n    msg.topic = sql;\n    return msg;\n}\n\nreturn null;",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 900,
+        "y": 580,
+        "wires": [
+            [
+                "69afd549f0b4f44e"
+            ]
+        ]
+    },
+    {
+        "id": "sql_generator_node",
+        "type": "function",
+        "z": "7e1af16790ca1d59",
+        "name": "Export SQL",
+        "func": "let w = msg.payload;\n\nconst MAX_CAPACITY = 222; \nconst START_COUNT = 23; \n\nlet api_temp = (w && w.main) ? w.main.temp : 32.0;\nlet api_feels_like = (w && w.main) ? w.main.feels_like : 32.0;\nlet api_humidity = (w && w.main) ? w.main.humidity : 60;\nlet api_clouds = (w && w.clouds) ? w.clouds.all : 0;\nlet is_raining = (w && w.weather && w.weather.length > 0 && w.weather[0].id < 600) ? 1 : 0;\n\nlet in_count = flow.get('accum_in_count') || 0;\nlet out_count = flow.get('accum_out_count') || 0;\nlet net_flow = in_count - out_count;\n\nlet board_temperature = flow.get('last_board_temp') || 0.0;\n\nlet avg_ultra_in = (in_count > 0) ? (flow.get('sum_ultra_in') / in_count).toFixed(2) : \"0.00\";\nlet avg_sharp_in = (in_count > 0) ? (flow.get('sum_sharp_in') / in_count).toFixed(2) : \"0.00\";\nlet avg_ultra_out = (out_count > 0) ? (flow.get('sum_ultra_out') / out_count).toFixed(2) : \"0.00\";\nlet avg_sharp_out = (out_count > 0) ? (flow.get('sum_sharp_out') / out_count).toFixed(2) : \"0.00\";\n\nlet avg_raw_ultra_in = (in_count > 0) ? (flow.get('sum_raw_ultra_in') / in_count).toFixed(0) : \"0\";\nlet avg_raw_sharp_in = (in_count > 0) ? (flow.get('sum_raw_sharp_in') / in_count).toFixed(0) : \"0\";\nlet avg_raw_ultra_out = (out_count > 0) ? (flow.get('sum_raw_ultra_out') / out_count).toFixed(0) : \"0\";\nlet avg_raw_sharp_out = (out_count > 0) ? (flow.get('sum_raw_sharp_out') / out_count).toFixed(0) : \"0\";\n\nlet current_vehicles = flow.get('global_vehicles');\nif (current_vehicles === undefined) current_vehicles = START_COUNT;\n\ncurrent_vehicles += net_flow;\nif (current_vehicles < 0) {\n    current_vehicles = 0;\n    out_count = in_count; \n    net_flow = 0;\n} else if (current_vehicles > MAX_CAPACITY) {\n    current_vehicles = MAX_CAPACITY;\n    in_count = out_count; \n    net_flow = 0;\n}\nflow.set('global_vehicles', current_vehicles);\n\nlet parking_percentage = parseFloat(((current_vehicles / MAX_CAPACITY) * 100).toFixed(2));\n\nlet sql = `INSERT INTO parking_logs \n(timestamp, in_count, out_count, net_flow, current_vehicles, parking_percentage, \napi_temperature, api_feels_like, api_humidity, api_clouds, board_temperature, is_raining, \npir_in_trigger, raw_ultrasonic_in_us, ultrasonic_in_cm, raw_lidar_in_analog, lidar_in_cm, \npir_out_trigger, raw_ultrasonic_out_us, ultrasonic_out_cm, raw_lidar_out_analog, lidar_out_cm) \nVALUES \n(NOW(), ${in_count}, ${out_count}, ${net_flow}, ${current_vehicles}, ${parking_percentage}, \n${api_temp}, ${api_feels_like}, ${api_humidity}, ${api_clouds}, ${board_temperature}, ${is_raining}, \n${flow.get('accum_pir_in') || 0}, ${avg_raw_ultra_in}, ${avg_ultra_in}, ${avg_raw_sharp_in}, ${avg_sharp_in}, \n${flow.get('accum_pir_out') || 0}, ${avg_raw_ultra_out}, ${avg_ultra_out}, ${avg_raw_sharp_out}, ${avg_sharp_out});`;\n\nmsg.topic = sql;\n\nflow.set('accum_in_count', 0);\nflow.set('accum_out_count', 0);\nflow.set('accum_pir_in', 0);\nflow.set('accum_pir_out', 0);\n\nflow.set('sum_ultra_in', 0);\nflow.set('sum_ultra_out', 0);\nflow.set('sum_sharp_in', 0);\nflow.set('sum_sharp_out', 0);\n\nflow.set('sum_raw_ultra_in', 0);\nflow.set('sum_raw_ultra_out', 0);\nflow.set('sum_raw_sharp_in', 0);\nflow.set('sum_raw_sharp_out', 0);\n\nreturn msg;",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 830,
+        "y": 280,
+        "wires": [
+            [
+                "69afd549f0b4f44e"
+            ]
+        ]
+    },
+    {
+        "id": "afa794712bb40253",
+        "type": "mqtt-broker",
+        "name": "",
+        "broker": "iot.cpe.ku.ac.th",
+        "port": 1883,
+        "clientid": "",
+        "autoConnect": true,
+        "usetls": false,
+        "protocolVersion": 4,
+        "keepalive": 60,
+        "cleansession": true,
+        "autoUnsubscribe": true,
+        "birthTopic": "",
+        "birthQos": "0",
+        "birthRetain": "false",
+        "birthPayload": "",
+        "birthMsg": {},
+        "closeTopic": "",
+        "closeQos": "0",
+        "closeRetain": "false",
+        "closePayload": "",
+        "closeMsg": {},
+        "willTopic": "",
+        "willQos": "0",
+        "willRetain": "false",
+        "willPayload": "",
+        "willMsg": {},
+        "userProps": "",
+        "sessionExpiry": ""
+    },
+    {
+        "id": "b7456f1677146e09",
+        "type": "MySQLdatabase",
+        "name": "mySQL",
+        "host": "iot.cpe.ku.ac.th",
+        "port": "3306",
+        "db": "b6710545768",
+        "tz": "",
+        "charset": "UTF8"
+    }
+]
