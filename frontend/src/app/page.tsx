@@ -1039,16 +1039,13 @@ function linearRegression(points: Array<{ x: number; y: number }>): { slope: num
   return { slope, intercept: meanY - slope * meanX }
 }
 
-function downloadTextFile(content: string, fileName: string): void {
-  const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' })
-  const url = URL.createObjectURL(blob)
+function downloadFileFromUrl(url: string, fileName: string): void {
   const link = document.createElement('a')
   link.href = url
   link.download = fileName
   document.body.appendChild(link)
   link.click()
   document.body.removeChild(link)
-  URL.revokeObjectURL(url)
 }
 
 function buildInsightReportMarkdown({
@@ -2616,7 +2613,8 @@ export default function Home(): React.ReactElement {
   )
 
   const downloadInsightReport = (): void => {
-    downloadTextFile(insightReportMarkdown, `parking_dashboard_report_${new Date().toISOString().slice(0, 10)}.md`)
+    void insightReportMarkdown
+    downloadFileFromUrl('/reports/Parksense_Report.pdf', 'Parksense_Report.pdf')
   }
 
   const openAnalyticsTab = (): void => {
