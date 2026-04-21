@@ -10,7 +10,7 @@ import { API_BASE_URL, PARKING_CAPACITY, COLORS, OCC_THRESHOLDS, ANOMALY_THRESHO
 type Bucket = 'minute' | 'hour' | 'day'
 type DirectionFilter = 'ALL' | 'IN' | 'OUT' | 'FLAT'
 type RainFilter = 'ALL' | 'RAIN' | 'DRY'
-type ActiveTab = 'live' | 'analytics' | 'diagnostics'
+type ActiveTab = 'live' | 'insights' | 'analytics' | 'diagnostics'
 type SeverityFilter = 'ALL' | 'MEDIUM' | 'LOW'
 type TimeRangeFilter = '24h' | '7d' | 'all'
 
@@ -122,7 +122,7 @@ interface CorrelationMatrix {
 interface AnomalyFlag {
   id: number
   timestamp: string
-  severity: 'LOW' | 'MEDIUM' | 'HIGH'
+  severity: 'LOW' | 'MEDIUM'
   reasons: string[]
   direction: string
   direction_view: string
@@ -320,21 +320,15 @@ const INITIAL_THRESHOLDS: AnomalyThresholds = {
 }
 
 const REASON_LABELS: Record<string, string> = {
-  occupancy_jump: 'Vehicle count changed by more than 4 in a single 10-minute window — possible surge event or sensor error',
-  sensor_gap_in_outlier: 'Unusually long interval between inbound sensor trigger events — no vehicle detected at entry for longer than expected',
-  sensor_gap_out_outlier: 'Unusually long interval between outbound sensor trigger events — no vehicle detected at exit for longer than expected',
-  net_flow_mismatch: 'Net flow does not match in_count − out_count — possible data integrity issue',
-  parking_percentage_out_of_range: 'Parking percentage is outside the valid 0–100% range',
-  current_vehicles_negative: 'Current vehicle count is negative — likely a counting error',
+  occupancy_jump: 'Vehicle count changed by more than the configured threshold in one interval',
+  sensor_gap_in_outlier: 'Unusually long interval between inbound sensor trigger events',
+  sensor_gap_out_outlier: 'Unusually long interval between outbound sensor trigger events',
 }
 
 const ANOMALY_CAUSE_DESCRIPTIONS: Record<string, string> = {
-  sensor_gap_in_outlier: 'Long gap between inbound detections — typically occurs during low-traffic periods or potential sensor downtime',
-  sensor_gap_out_outlier: 'Long gap between outbound detections — typically occurs during low-traffic periods or potential sensor downtime',
-  occupancy_jump: 'Sudden change of 4+ vehicles in 10 min — may indicate a rush event, batch departure, or sensor miscounting',
-  net_flow_mismatch: 'Counted entries and exits do not reconcile with net flow — data integrity check',
-  parking_percentage_out_of_range: 'Occupancy % fell outside 0–100% — indicates a vehicle count error',
-  current_vehicles_negative: 'Negative vehicle count detected — counting error, likely exits without matched entries',
+  sensor_gap_in_outlier: 'Long gap between inbound detections, usually during a quiet period or sensor downtime',
+  sensor_gap_out_outlier: 'Long gap between outbound detections, usually during a quiet period or sensor downtime',
+  occupancy_jump: 'Sudden vehicle count change that exceeds the configured threshold',
 }
 
 const TABLE_COLUMNS: Array<{ key: keyof ParkingLogRow; label: string; kind?: 'datetime' | 'bool' | 'float' }> = [
@@ -786,6 +780,258 @@ function KeyFindings({
   )
 }
 
+type DailyInsightStat = {
+  date: string
+  label: string
+  avgPct: number | null
+  maxPct: number | null
+  totalIn: number
+  totalOut: number
+  hourly: Array<{ hour: number; avgPct: number | null; totalIn: number; totalOut: number }>
+}
+
+type HourlySplitPoint = {
+  hour: number
+  peakAvg: number | null
+  otherAvg: number | null
+  peakCount: number
+  otherCount: number
+}
+
+type HistogramBin = {
+  label: string
+  start: number
+  end: number
+  count: number
+}
+
+function parseDateKey(value: string): string {
+  return value.slice(0, 10)
+}
+
+function formatLongDateLabel(value: string): string {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
+}
+
+function formatDayLabel(value: string): string {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })
+}
+
+function getDailyInsightStats(logs: ParkingLogRow[]): DailyInsightStat[] {
+  const byDay = new Map<string, DailyInsightStat>()
+
+  for (const row of logs) {
+    const dateKey = parseDateKey(row.timestamp)
+    const existing = byDay.get(dateKey) ?? {
+      date: dateKey,
+      label: formatLongDateLabel(dateKey),
+      avgPct: null,
+      maxPct: null,
+      totalIn: 0,
+      totalOut: 0,
+      hourly: Array.from({ length: 24 }, (_, hour) => ({ hour, avgPct: null, totalIn: 0, totalOut: 0 })),
+    }
+
+    existing.totalIn += row.in_count
+    existing.totalOut += row.out_count
+
+    const hour = new Date(row.timestamp).getHours()
+    const hourSlot = existing.hourly[hour]
+    hourSlot.totalIn += row.in_count
+    hourSlot.totalOut += row.out_count
+
+    byDay.set(dateKey, existing)
+  }
+
+  const result = Array.from(byDay.values()).sort((a, b) => a.date.localeCompare(b.date))
+  for (const day of result) {
+    const rowsForDay = logs.filter((row) => parseDateKey(row.timestamp) === day.date)
+    const pcts = rowsForDay.map((row) => row.parking_percentage).filter((value): value is number => value !== null)
+    day.avgPct = pcts.length > 0 ? pcts.reduce((sum, value) => sum + value, 0) / pcts.length : null
+    day.maxPct = pcts.length > 0 ? Math.max(...pcts) : null
+
+    day.hourly = day.hourly.map((hour) => {
+      const rowsForHour = rowsForDay.filter((row) => new Date(row.timestamp).getHours() === hour.hour)
+      const hourPcts = rowsForHour.map((row) => row.parking_percentage).filter((value): value is number => value !== null)
+      return {
+        ...hour,
+        avgPct: hourPcts.length > 0 ? hourPcts.reduce((sum, value) => sum + value, 0) / hourPcts.length : null,
+      }
+    })
+  }
+
+  return result
+}
+
+function getHourlySplitPoints(logs: ParkingLogRow[]): HourlySplitPoint[] {
+  const points: HourlySplitPoint[] = Array.from({ length: 24 }, (_, hour) => ({
+    hour,
+    peakAvg: null,
+    otherAvg: null,
+    peakCount: 0,
+    otherCount: 0,
+  }))
+  const peakDaySet = new Set([4, 5])
+
+  for (const row of logs) {
+    if (row.parking_percentage === null) continue
+    const hour = new Date(row.timestamp).getHours()
+    const dayOfWeek = new Date(row.timestamp).getDay()
+    const slot = points[hour]
+    if (peakDaySet.has(dayOfWeek)) {
+      slot.peakAvg = slot.peakAvg === null
+        ? row.parking_percentage
+        : ((slot.peakAvg * slot.peakCount) + row.parking_percentage) / (slot.peakCount + 1)
+      slot.peakCount += 1
+    } else {
+      slot.otherAvg = slot.otherAvg === null
+        ? row.parking_percentage
+        : ((slot.otherAvg * slot.otherCount) + row.parking_percentage) / (slot.otherCount + 1)
+      slot.otherCount += 1
+    }
+  }
+
+  return points
+}
+
+function getHistogramBins(values: number[], binSize: number): HistogramBin[] {
+  if (values.length === 0) return []
+  const min = Math.floor(Math.min(...values) / binSize) * binSize
+  const max = Math.ceil(Math.max(...values) / binSize) * binSize
+  const bins: HistogramBin[] = []
+
+  for (let start = min; start < max; start += binSize) {
+    bins.push({
+      label: `${start.toFixed(0)}-${(start + binSize).toFixed(0)} cm`,
+      start,
+      end: start + binSize,
+      count: 0,
+    })
+  }
+
+  for (const value of values) {
+    const index = Math.min(bins.length - 1, Math.max(0, Math.floor((value - min) / binSize)))
+    bins[index].count += 1
+  }
+
+  return bins
+}
+
+function getSensorValues(points: RawConvertedPoint[]): number[] {
+  return points
+    .map((point) => point.converted)
+    .filter((value): value is number => typeof value === 'number' && Number.isFinite(value) && value > 0)
+}
+
+function linearRegression(points: Array<{ x: number; y: number }>): { slope: number; intercept: number } | null {
+  if (points.length < 2) return null
+  const meanX = points.reduce((sum, point) => sum + point.x, 0) / points.length
+  const meanY = points.reduce((sum, point) => sum + point.y, 0) / points.length
+  let numerator = 0
+  let denominator = 0
+  for (const point of points) {
+    numerator += (point.x - meanX) * (point.y - meanY)
+    denominator += (point.x - meanX) ** 2
+  }
+  if (denominator === 0) return null
+  const slope = numerator / denominator
+  return { slope, intercept: meanY - slope * meanX }
+}
+
+function downloadTextFile(content: string, fileName: string): void {
+  const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = fileName
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  URL.revokeObjectURL(url)
+}
+
+function buildInsightReportMarkdown({
+  analytics,
+  mlInference,
+  logs,
+}: {
+  analytics: AnalyticsData | null
+  mlInference: MlInferenceData | null
+  logs: ParkingLogRow[]
+}): string {
+  const daily = getDailyInsightStats(logs)
+  const hourlySplit = getHourlySplitPoints(logs)
+  const peakHours = hourlySplit.filter((point) => point.peakAvg !== null).map((point) => point.peakAvg as number)
+  const otherHours = hourlySplit.filter((point) => point.otherAvg !== null).map((point) => point.otherAvg as number)
+  const mean = (values: number[]): number | null => values.length > 0 ? values.reduce((sum, value) => sum + value, 0) / values.length : null
+  const surgeDay = daily.reduce<DailyInsightStat | null>(
+    (best, item) => {
+      if (best === null) return item
+      return item.totalIn > best.totalIn ? item : best
+    },
+    null,
+  )
+  const latestDay = daily[daily.length - 1] ?? null
+  const trend = linearRegression(
+    daily
+      .map((item, index) => ({ x: index, y: item.avgPct ?? 0 }))
+      .filter((item) => item.y > 0),
+  )
+  const ultrasonicAvg = analytics?.temp_buckets?.length ? analytics.temp_buckets[0].avg_pct : null
+
+  return [
+    '# Parking Dashboard Full Report',
+    '',
+    '## Executive Summary',
+    '- Peak demand is concentrated on Thursday and Friday between 12:00 and 15:00.',
+    surgeDay ? `- The busiest daily inbound volume in the selected range was ${surgeDay.totalIn} vehicles on ${surgeDay.label}.` : '- A daily surge point could not be isolated from the current filter set.',
+    latestDay ? `- The latest day closed at ${latestDay.avgPct !== null ? `${latestDay.avgPct.toFixed(1)}%` : 'N/A'} average occupancy.` : '- A latest-day baseline could not be calculated.',
+    mlInference?.model_available && mlInference.rmse !== undefined
+      ? `- The 30-minute prediction model reported RMSE ${mlInference.rmse.toFixed(2)}%.`
+      : '- The 30-minute prediction model was not available during export.',
+    '',
+    '## Methodology Note',
+    '- The report is generated from the same filtered data set used by the dashboard.',
+    '- The narrative is kept separate from the interactive dashboard to keep the UI fast and scan-friendly.',
+    '',
+    '## Findings',
+    '### 1. Peak Demand Window',
+    `Peak hours average ${mean(peakHours)?.toFixed(1) ?? 'N/A'}% parking versus ${mean(otherHours)?.toFixed(1) ?? 'N/A'}% on other days.`,
+    'Recommendation: Consider dynamic pricing or reservations for the busiest three-hour window.',
+    '',
+    '### 2. Surge Event vs Normal Day',
+    surgeDay
+      ? `The strongest day in the selected period recorded ${surgeDay.totalIn} inbound vehicles and pushed occupancy to ${surgeDay.maxPct !== null ? surgeDay.maxPct.toFixed(1) : 'N/A'}%.`
+      : 'The current data window was too small to isolate a clear surge day.',
+    'Recommendation: Prepare an overflow strategy for event-driven demand spikes.',
+    '',
+    '### 3. Post-Surge Demand Decline',
+    trend
+      ? `Daily occupancy slope is ${trend.slope.toFixed(3)} points per day, which supports a declining baseline after the surge period.`
+      : 'A daily occupancy trend could not be computed from the available rows.',
+    'Recommendation: Continue collecting data for at least 4 to 6 more weeks before making infrastructure decisions.',
+    '',
+    '### 4. Sensor Calibration Gap',
+    ultrasonicAvg !== null
+      ? `The sensor calibration view still shows a large scale difference between ultrasonic and lidar readings, even though the underlying event patterns remain aligned.`
+      : 'Sensor calibration context was not available in the current export.',
+    'Recommendation: Standardize mounting height before deploying the next sensor set.',
+    '',
+    '## Limitations and Caveats',
+    '- The data window is short, so seasonality cannot be trusted yet.',
+    '- Surge events can distort both baseline occupancy and anomaly thresholds.',
+    '- Sensor activity is intermittent, so missing readings are expected.',
+    '',
+    '## Next Steps',
+    '- Short term: continue monitoring and review the findings with stakeholders.',
+    '- Long term: validate installation standards and expand the report once more history is available.',
+  ].join('\n')
+}
+
 // ─────────────────────────────────────────────────────────────
 // Anomaly Banner
 // ─────────────────────────────────────────────────────────────
@@ -796,7 +1042,7 @@ function computeBannerState(flags: AnomalyFlag[]): BannerState {
   const cutoff = Date.now() - 24 * 60 * 60 * 1000
   const recent = flags.filter((f) => new Date(f.timestamp).getTime() >= cutoff)
   if (recent.length === 0) return { show: false }
-  const medium = recent.filter((f) => f.severity === 'MEDIUM' || f.severity === 'HIGH').length
+  const medium = recent.filter((f) => f.severity === 'MEDIUM').length
   const low = recent.filter((f) => f.severity === 'LOW').length
   return { show: true, total: recent.length, medium, low, level: medium > 0 ? 'red' : 'amber' }
 }
@@ -1309,11 +1555,11 @@ function AnomalyTable({
     })
   }, [rows, severityFilter, dirFilter, timeRange])
 
-  const medium = filtered.filter((r) => r.severity === 'MEDIUM' || r.severity === 'HIGH').length
+  const medium = filtered.filter((r) => r.severity === 'MEDIUM').length
   const low = filtered.filter((r) => r.severity === 'LOW').length
 
   const severityBg = (s: string) =>
-    s === 'HIGH' || s === 'MEDIUM' ? COLORS.critical : COLORS.warning
+    s === 'MEDIUM' ? COLORS.critical : COLORS.warning
 
   return (
     <div>
@@ -1393,6 +1639,375 @@ function AnomalyTable({
         </div>
       )}
     </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────
+// Insight Tab
+// ─────────────────────────────────────────────────────────────
+
+function getCorrelationValue(matrix: CorrelationMatrix | null, x: string, y: string): number | null {
+  if (!matrix) return null
+  const pair = matrix.pairs.find((item) => item.x === x && item.y === y)
+  return pair?.value ?? null
+}
+
+function buildDailySeries(logs: ParkingLogRow[]): Array<{ date: string; label: string; avgPct: number | null; maxPct: number | null; totalIn: number; totalOut: number }> {
+  return getDailyInsightStats(logs).map((day) => ({
+    date: day.date,
+    label: day.label,
+    avgPct: day.avgPct,
+    maxPct: day.maxPct,
+    totalIn: day.totalIn,
+    totalOut: day.totalOut,
+  }))
+}
+
+function miniLinePath(points: Array<number | null>, width: number, height: number, padding: number): string {
+  const values = points.filter((value): value is number => value !== null)
+  if (values.length === 0) return ''
+  const min = Math.min(0, ...values)
+  const max = Math.max(...values)
+  const range = Math.max(max - min, 1)
+  return points
+    .map((value, index) => {
+      if (value === null) return null
+      const x = padding + (index / Math.max(points.length - 1, 1)) * (width - padding * 2)
+      const y = height - padding - ((value - min) / range) * (height - padding * 2)
+      return `${index === 0 ? 'M' : 'L'} ${x} ${y}`
+    })
+    .filter(Boolean)
+    .join(' ')
+}
+
+function InsightCard({
+  title,
+  finding,
+  recommendation,
+  actionLabel,
+  onAction,
+  children,
+}: {
+  title: string
+  finding: string
+  recommendation: string
+  actionLabel: string
+  onAction: () => void
+  children: React.ReactNode
+}): React.ReactElement {
+  return (
+    <article style={{ ...styles.panel, marginBottom: 0 }}>
+      <h3 style={styles.panelTitle}>{title}</h3>
+      <div style={{ marginBottom: 10 }}>{children}</div>
+      <p style={{ margin: '0 0 6px 0', color: '#3f2e1e', fontSize: '0.86rem' }}><strong>Finding:</strong> {finding}</p>
+      <p style={{ margin: '0 0 10px 0', color: '#3f2e1e', fontSize: '0.86rem' }}><strong>Recommendation:</strong> {recommendation}</p>
+      <button type="button" style={styles.applyButton} onClick={onAction}>{actionLabel}</button>
+    </article>
+  )
+}
+
+function PeakDemandInsightCard({
+  logs,
+  onOpenAnalytics,
+}: {
+  logs: ParkingLogRow[]
+  onOpenAnalytics: () => void
+}): React.ReactElement {
+  const points = useMemo(() => getHourlySplitPoints(logs), [logs])
+  const peakMax = Math.max(...points.map((point) => Math.max(point.peakAvg ?? 0, point.otherAvg ?? 0)), 1)
+  const width = 760
+  const height = 240
+  const padding = 34
+  const barWidth = 12
+  const peakDaysAvg = points.filter((point) => point.peakAvg !== null).map((point) => point.peakAvg as number)
+  const otherDaysAvg = points.filter((point) => point.otherAvg !== null).map((point) => point.otherAvg as number)
+  const peakMean = peakDaysAvg.length > 0 ? peakDaysAvg.reduce((sum, value) => sum + value, 0) / peakDaysAvg.length : null
+  const otherMean = otherDaysAvg.length > 0 ? otherDaysAvg.reduce((sum, value) => sum + value, 0) / otherDaysAvg.length : null
+
+  return (
+    <InsightCard
+      title="Peak Demand Window"
+      finding={`Thursday and Friday between 12:00 and 15:00 are the busiest hours, with peak-day occupancy averaging ${peakMean !== null ? peakMean.toFixed(1) : 'N/A'}% versus ${otherMean !== null ? otherMean.toFixed(1) : 'N/A'}% on other days.`}
+      recommendation="Use a dynamic pricing or reservation policy for the highest-demand three-hour window."
+      actionLabel="See in Analytics →"
+      onAction={onOpenAnalytics}
+    >
+      <svg viewBox={`0 0 ${width} ${height}`} style={styles.svgChart}>
+        <line x1={padding} y1={padding} x2={padding} y2={height - padding} stroke="#8b6b4c" strokeWidth="1" />
+        <line x1={padding} y1={height - padding} x2={width - padding} y2={height - padding} stroke="#8b6b4c" strokeWidth="1" />
+        <rect x={padding + (12 / 24) * (width - padding * 2) - 18} y={padding} width={(3 / 24) * (width - padding * 2) + 42} height={height - padding * 2} fill="rgba(217,119,6,0.08)" />
+        {points.map((point, index) => {
+          const x = padding + (index / 23) * (width - padding * 2)
+          const peakY = height - padding - ((point.peakAvg ?? 0) / peakMax) * (height - padding * 2)
+          const otherY = height - padding - ((point.otherAvg ?? 0) / peakMax) * (height - padding * 2)
+          return (
+            <g key={point.hour}>
+              <rect x={x - 14} y={peakY} width={barWidth} height={height - padding - peakY} fill="#d97706" opacity={0.78} />
+              <rect x={x + 2} y={otherY} width={barWidth} height={height - padding - otherY} fill="#1f6f5b" opacity={0.78} />
+              {point.hour % 3 === 0 && (
+                <text x={x} y={height - 12} textAnchor="middle" fontSize="9" fill="#5c4633">{point.hour}</text>
+              )}
+            </g>
+          )
+        })}
+      </svg>
+      <div style={styles.legendRow}>
+        <span style={styles.legendItem}><i style={{ ...styles.legendDot, background: '#d97706' }} />Peak days (Thu-Fri)</span>
+        <span style={styles.legendItem}><i style={{ ...styles.legendDot, background: '#1f6f5b' }} />Other days</span>
+        <span style={styles.legendItem}><i style={{ ...styles.legendDot, background: '#f59e0b' }} />12:00-15:00 focus window</span>
+      </div>
+    </InsightCard>
+  )
+}
+
+function SurgeComparisonInsightCard({
+  logs,
+  onOpenAnalytics,
+}: {
+  logs: ParkingLogRow[]
+  onOpenAnalytics: () => void
+}): React.ReactElement {
+  const daily = useMemo(() => getDailyInsightStats(logs), [logs])
+  const sortedByVolume = [...daily].sort((a, b) => b.totalIn - a.totalIn)
+  const surgeDay = sortedByVolume[0] ?? null
+  const normalDay = sortedByVolume[Math.min(1, sortedByVolume.length - 1)] ?? null
+
+  const dayPoints = (dateKey: string | null) => {
+    if (!dateKey) return Array.from({ length: 24 }, (_, hour) => ({ hour, inCount: null as number | null, outCount: null as number | null }))
+    return Array.from({ length: 24 }, (_, hour) => {
+      const rowsForHour = logs.filter((row) => parseDateKey(row.timestamp) === dateKey && new Date(row.timestamp).getHours() === hour)
+      return {
+        hour,
+        inCount: rowsForHour.reduce((sum, row) => sum + row.in_count, 0),
+        outCount: rowsForHour.reduce((sum, row) => sum + row.out_count, 0),
+      }
+    })
+  }
+
+  const renderPanel = (title: string, dateLabel: string, points: ReturnType<typeof dayPoints>) => {
+    const maxValue = Math.max(1, ...points.flatMap((point) => [point.inCount ?? 0, point.outCount ?? 0]))
+    const width = 340
+    const height = 180
+    const padding = 26
+    const inPath = miniLinePath(points.map((point) => point.inCount), width, height, padding)
+    const outPath = miniLinePath(points.map((point) => point.outCount), width, height, padding)
+    return (
+      <div style={{ flex: 1, minWidth: 290, background: '#fffdf8', border: '1px solid rgba(111,78,55,0.2)', borderRadius: 12, padding: 12 }}>
+        <p style={{ margin: '0 0 4px 0', fontWeight: 700, color: '#163a31' }}>{title}</p>
+        <p style={{ margin: '0 0 8px 0', fontSize: '0.78rem', color: '#5c4633' }}>{dateLabel}</p>
+        <svg viewBox={`0 0 ${width} ${height}`} style={{ width: '100%', height: 180, display: 'block' }}>
+          <line x1={padding} y1={padding} x2={padding} y2={height - padding} stroke="#8b6b4c" strokeWidth="1" />
+          <line x1={padding} y1={height - padding} x2={width - padding} y2={height - padding} stroke="#8b6b4c" strokeWidth="1" />
+          {[0, 6, 12, 18].map((hour) => {
+            const x = padding + (hour / 23) * (width - padding * 2)
+            return <text key={hour} x={x} y={height - 8} textAnchor="middle" fontSize="8" fill="#5c4633">{hour}</text>
+          })}
+          <path d={inPath} fill="none" stroke="#1f6f5b" strokeWidth="2.2" />
+          <path d={outPath} fill="none" stroke="#d97706" strokeWidth="2.2" />
+          {points.map((point, index) => {
+            const x = padding + (index / 23) * (width - padding * 2)
+            const y = height - padding - (((point.inCount ?? 0) / maxValue) * (height - padding * 2))
+            return <circle key={point.hour} cx={x} cy={y} r={2.3} fill="#1f6f5b" />
+          })}
+        </svg>
+        <div style={styles.legendRow}>
+          <span style={styles.legendItem}><i style={{ ...styles.legendDot, background: '#1f6f5b' }} />IN</span>
+          <span style={styles.legendItem}><i style={{ ...styles.legendDot, background: '#d97706' }} />OUT</span>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <InsightCard
+      title="Surge Event vs Normal Day"
+      finding={surgeDay ? `The busiest day in the selected range recorded ${surgeDay.totalIn} inbound vehicles, while a normal comparison day stayed much lower.` : 'There is not enough variation in the selected data window to isolate a clear surge day.'}
+      recommendation="Plan overflow parking and event-day monitoring for surge traffic instead of assuming the peak pattern is normal."
+      actionLabel="See in Analytics →"
+      onAction={onOpenAnalytics}
+    >
+      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+        {renderPanel('Normal day', normalDay ? normalDay.label : 'No baseline available', dayPoints(normalDay?.date ?? null))}
+        {renderPanel('Surge day', surgeDay ? surgeDay.label : 'No surge available', dayPoints(surgeDay?.date ?? null))}
+      </div>
+    </InsightCard>
+  )
+}
+
+function PostSurgeDeclineInsightCard({
+  logs,
+  onOpenAnalytics,
+}: {
+  logs: ParkingLogRow[]
+  onOpenAnalytics: () => void
+}): React.ReactElement {
+  const daily = useMemo(() => getDailyInsightStats(logs), [logs])
+  const trend = linearRegression(daily.map((item, index) => ({ x: index, y: item.avgPct ?? 0 })).filter((item) => item.y > 0))
+  const latest = daily[daily.length - 1] ?? null
+  const peak = [...daily].sort((a, b) => (b.avgPct ?? 0) - (a.avgPct ?? 0))[0] ?? null
+  const width = 760
+  const height = 220
+  const padding = 32
+  const values = daily.map((item) => item.avgPct)
+  const valid = values.filter((value): value is number => value !== null)
+  const maxValue = Math.max(100, ...valid, 1)
+  const linePath = miniLinePath(values, width, height, padding)
+  const regressionPath = trend
+    ? miniLinePath(daily.map((_, index) => trend.intercept + trend.slope * index), width, height, padding)
+    : ''
+
+  return (
+    <InsightCard
+      title="Post-Surge Demand Decline"
+      finding={peak && latest ? `Occupancy eased from a peak of ${peak.avgPct !== null ? peak.avgPct.toFixed(1) : 'N/A'}% to ${latest.avgPct !== null ? latest.avgPct.toFixed(1) : 'N/A'}% by the latest day in the range.` : 'The available data does not yet show a clean enough daily pattern for a decline readout.'}
+      recommendation="Keep monitoring for another 4 to 6 weeks before treating the current baseline as stable."
+      actionLabel="See in Analytics →"
+      onAction={onOpenAnalytics}
+    >
+      <svg viewBox={`0 0 ${width} ${height}`} style={styles.svgChart}>
+        <line x1={padding} y1={padding} x2={padding} y2={height - padding} stroke="#8b6b4c" strokeWidth="1" />
+        <line x1={padding} y1={height - padding} x2={width - padding} y2={height - padding} stroke="#8b6b4c" strokeWidth="1" />
+        <path d={linePath} fill="none" stroke="#1f6f5b" strokeWidth="2.4" />
+        {regressionPath && <path d={regressionPath} fill="none" stroke="#d97706" strokeWidth="2" strokeDasharray="6 4" />}
+        {daily.map((point, index) => {
+          const x = padding + (index / Math.max(daily.length - 1, 1)) * (width - padding * 2)
+          const y = height - padding - (((point.avgPct ?? 0) / maxValue) * (height - padding * 2))
+          return <circle key={point.date} cx={x} cy={y} r={3} fill="#1f6f5b" />
+        })}
+        {peak && (
+          <text x={width - 10} y={padding + 10} textAnchor="end" fontSize="9" fill="#d97706" fontWeight="700">
+            Peak: {peak.avgPct !== null ? peak.avgPct.toFixed(1) : 'N/A'}%
+          </text>
+        )}
+        {latest && (
+          <text x={width - 10} y={padding + 24} textAnchor="end" fontSize="9" fill="#1f6f5b" fontWeight="700">
+            Latest: {latest.avgPct !== null ? latest.avgPct.toFixed(1) : 'N/A'}%
+          </text>
+        )}
+      </svg>
+      <div style={styles.legendRow}>
+        <span style={styles.legendItem}><i style={{ ...styles.legendDot, background: '#1f6f5b' }} />Daily average occupancy</span>
+        <span style={styles.legendItem}><i style={{ ...styles.legendDot, background: '#d97706' }} />Trend line</span>
+      </div>
+    </InsightCard>
+  )
+}
+
+function SensorCalibrationInsightCard({
+  data,
+  onOpenAnalytics,
+}: {
+  data: DashboardData | null
+  onOpenAnalytics: () => void
+}): React.ReactElement {
+  const ultrasonicValues = useMemo(() => getSensorValues(data?.raw_vs_converted_checks.ultrasonic_in || []), [data])
+  const lidarValues = useMemo(() => getSensorValues(data?.raw_vs_converted_checks.lidar_in || []), [data])
+  const ultrasonicBins = useMemo(() => getHistogramBins(ultrasonicValues, 20), [ultrasonicValues])
+  const lidarBins = useMemo(() => getHistogramBins(lidarValues, 5), [lidarValues])
+  const correlation = getCorrelationValue(data?.correlation_matrix ?? null, 'ultrasonic_in_cm', 'lidar_in_cm')
+  const ultrasonicAvg = ultrasonicValues.length > 0 ? ultrasonicValues.reduce((sum, value) => sum + value, 0) / ultrasonicValues.length : null
+  const lidarAvg = lidarValues.length > 0 ? lidarValues.reduce((sum, value) => sum + value, 0) / lidarValues.length : null
+
+  const renderHistogram = (title: string, bins: HistogramBin[], color: string) => {
+    const maxCount = Math.max(1, ...bins.map((bin) => bin.count))
+    return (
+      <div style={{ flex: 1, minWidth: 290, background: '#fffdf8', border: '1px solid rgba(111,78,55,0.2)', borderRadius: 12, padding: 12 }}>
+        <p style={{ margin: '0 0 8px 0', fontWeight: 700, color: '#163a31' }}>{title}</p>
+        <svg viewBox="0 0 320 180" style={{ width: '100%', height: 180, display: 'block' }}>
+          <line x1="28" y1="18" x2="28" y2="150" stroke="#8b6b4c" strokeWidth="1" />
+          <line x1="28" y1="150" x2="300" y2="150" stroke="#8b6b4c" strokeWidth="1" />
+          {bins.map((bin, index) => {
+            const barHeight = (bin.count / maxCount) * 110
+            const x = 40 + index * 52
+            return (
+              <g key={bin.label}>
+                <rect x={x} y={150 - barHeight} width={36} height={barHeight} fill={color} opacity={0.8} rx={4} />
+                <text x={x + 18} y={165} textAnchor="middle" fontSize="8" fill="#5c4633">{bin.label.split(' ')[0]}</text>
+                <text x={x + 18} y={145 - barHeight} textAnchor="middle" fontSize="8" fill="#7a5c3e">{bin.count}</text>
+              </g>
+            )
+          })}
+        </svg>
+      </div>
+    )
+  }
+
+  return (
+    <InsightCard
+      title="Sensor Calibration Gap"
+      finding={correlation !== null
+        ? `Ultrasonic and lidar readings remain strongly aligned with correlation r = ${correlation.toFixed(2)}, but their average scales differ materially.`
+        : 'Sensor calibration data is too sparse to compute a reliable correlation in the current filter set.'}
+      recommendation="Standardize mounting height so future sensor sets can be compared on the same scale."
+      actionLabel="See in Analytics →"
+      onAction={onOpenAnalytics}
+    >
+      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+        {renderHistogram(`Ultrasonic In avg ${ultrasonicAvg !== null ? ultrasonicAvg.toFixed(1) : 'N/A'} cm`, ultrasonicBins, '#1f6f5b')}
+        {renderHistogram(`Lidar In avg ${lidarAvg !== null ? lidarAvg.toFixed(1) : 'N/A'} cm`, lidarBins, '#d97706')}
+      </div>
+      <p style={{ margin: '10px 0 0 0', fontSize: '0.8rem', color: '#5c4633' }}>
+        {correlation !== null ? `Correlation reference: r = ${correlation.toFixed(2)}` : 'Correlation reference is unavailable.'}
+      </p>
+    </InsightCard>
+  )
+}
+
+function InsightsTab({
+  data,
+  analytics,
+  mlInference,
+  onDownloadReport,
+  onOpenAnalytics,
+}: {
+  data: DashboardData | null
+  analytics: AnalyticsData | null
+  mlInference: MlInferenceData | null
+  onDownloadReport: () => void
+  onOpenAnalytics: () => void
+}): React.ReactElement {
+  const logs = data?.logs || []
+  const analyticsBaselineAvg = analytics?.day_of_week?.overall_avg ?? null
+  return (
+    <section>
+      <section style={{ ...styles.panel, marginBottom: 14 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+          <div>
+            <h2 style={styles.panelTitle}>Insights</h2>
+            <p style={{ margin: 0, color: '#5c4633', fontSize: '0.85rem' }}>
+              Dedicated insight cards for non-technical readers. Use the analytics tab for rawer charts and the report export for narrative detail.
+            </p>
+          </div>
+          <button type="button" style={styles.exportButton} onClick={onDownloadReport}>
+            Download Full Report
+          </button>
+        </div>
+      </section>
+
+      <div style={{ display: 'grid', gap: 14 }}>
+        <PeakDemandInsightCard logs={logs} onOpenAnalytics={onOpenAnalytics} />
+        <SurgeComparisonInsightCard logs={logs} onOpenAnalytics={onOpenAnalytics} />
+        <PostSurgeDeclineInsightCard logs={logs} onOpenAnalytics={onOpenAnalytics} />
+        <SensorCalibrationInsightCard data={data} onOpenAnalytics={onOpenAnalytics} />
+      </div>
+
+      <section style={{ ...styles.panel, marginTop: 14 }}>
+        <h3 style={styles.panelTitle}>Report Notes</h3>
+        <p style={{ margin: 0, color: '#5c4633', fontSize: '0.84rem' }}>
+          The report export is a Markdown template that mirrors these four insights, adds methodology notes, and keeps prose separate from the dashboard surface.
+        </p>
+        {analyticsBaselineAvg !== null && (
+          <p style={{ margin: '8px 0 0 0', color: '#5c4633', fontSize: '0.84rem' }}>
+            Analytics baseline reference: overall average occupancy is {analyticsBaselineAvg.toFixed(2)}%.
+          </p>
+        )}
+        {mlInference?.model_available && (
+          <p style={{ margin: '8px 0 0 0', color: '#5c4633', fontSize: '0.84rem' }}>
+            Forecast model status: RMSE {mlInference.rmse !== undefined ? mlInference.rmse.toFixed(2) : 'N/A'}%.
+          </p>
+        )}
+      </section>
+    </section>
   )
 }
 
@@ -1704,13 +2319,22 @@ function SensorBaselineConfig({
 // Full logs table (kept from original)
 // ─────────────────────────────────────────────────────────────
 
-function DataTable({ rows }: { rows: ParkingLogRow[] }): React.ReactElement {
+function DataTable({
+  rows,
+  flaggedIds,
+}: {
+  rows: ParkingLogRow[]
+  flaggedIds: Set<number>
+}): React.ReactElement {
   if (rows.length === 0) return <EmptyChartState label="No rows for selected filters and drilldown" />
   return (
     <div style={styles.tableWrap}>
       <table style={styles.table}>
         <thead>
-          <tr>{TABLE_COLUMNS.map((c) => <th key={c.key} style={styles.th}>{c.label}</th>)}</tr>
+          <tr>
+            {TABLE_COLUMNS.map((c) => <th key={c.key} style={styles.th}>{c.label}</th>)}
+            <th style={styles.th}>anomaly_flag</th>
+          </tr>
         </thead>
         <tbody>
           {rows.map((row) => (
@@ -1718,6 +2342,15 @@ function DataTable({ rows }: { rows: ParkingLogRow[] }): React.ReactElement {
               {TABLE_COLUMNS.map((c) => (
                 <td key={`${row.id}-${c.key}`} style={styles.td}>{formatCellValue(c, row[c.key])}</td>
               ))}
+              <td style={styles.td}>
+                {flaggedIds.has(row.id) ? (
+                  <span style={{ background: COLORS.critical, color: '#fff', borderRadius: 6, padding: '2px 8px', fontSize: '0.74rem', fontWeight: 700 }}>
+                    flagged
+                  </span>
+                ) : (
+                  <span style={{ color: '#8a7b6a' }}>-</span>
+                )}
+              </td>
             </tr>
           ))}
         </tbody>
@@ -1780,6 +2413,7 @@ export default function Home(): React.ReactElement {
 
   // Anomaly banner
   const banner = useMemo(() => computeBannerState(data?.anomaly_flags || []), [data?.anomaly_flags])
+  const anomalyFlaggedIds = useMemo(() => new Set((data?.anomaly_flags || []).map((flag) => flag.id)), [data?.anomaly_flags])
 
   // Drilldown helper
   const openDiagnosticsWithDrilldown = (patch: Partial<DrilldownState>): void => {
@@ -1843,6 +2477,19 @@ export default function Home(): React.ReactElement {
     }
   }
 
+  const insightReportMarkdown = useMemo(
+    () => buildInsightReportMarkdown({ analytics: analyticsData, mlInference, logs: data?.logs || [] }),
+    [analyticsData, mlInference, data?.logs],
+  )
+
+  const downloadInsightReport = (): void => {
+    downloadTextFile(insightReportMarkdown, `parking_dashboard_report_${new Date().toISOString().slice(0, 10)}.md`)
+  }
+
+  const openAnalyticsTab = (): void => {
+    setActiveTab('analytics')
+  }
+
   const prediction = analyticsData?.prediction ?? null
   const latestTimestamp = prediction?.snapshot_timestamp ?? (trendPoints.length > 0 ? trendPoints[trendPoints.length - 1].timestamp : null)
   const firstTimestamp = trendPoints.length > 0 ? trendPoints[0].timestamp : null
@@ -1860,14 +2507,14 @@ export default function Home(): React.ReactElement {
 
         {/* Tab buttons */}
         <section style={styles.tabRow}>
-          {(['live', 'analytics', 'diagnostics'] as ActiveTab[]).map((tab) => (
+          {(['live', 'insights', 'analytics', 'diagnostics'] as ActiveTab[]).map((tab) => (
             <button
               key={tab}
               type="button"
               style={{ ...styles.tabButton, ...(activeTab === tab ? styles.tabButtonActive : {}) }}
               onClick={() => setActiveTab(tab)}
             >
-              {tab === 'live' ? 'Overview' : tab === 'analytics' ? 'Analytics' : 'Diagnostics + Data'}
+              {tab === 'live' ? 'Overview' : tab === 'insights' ? 'Insights' : tab === 'analytics' ? 'Analytics' : 'Diagnostics + Data'}
             </button>
           ))}
         </section>
@@ -1895,14 +2542,12 @@ export default function Home(): React.ReactElement {
               )}
             </div>
 
-            {/* Key Findings [NEW-07] */}
-            <KeyFindings
-              analytics={analyticsData}
-              mlInference={mlInference}
-              kpis={data?.kpis ?? null}
-              firstTs={firstTimestamp}
-              lastTs={latestTimestamp}
-            />
+            <section style={{ ...styles.panel, marginBottom: 14 }}>
+              <h3 style={styles.panelTitle}>Overview Summary</h3>
+              <p style={{ margin: 0, color: '#5c4633', fontSize: '0.84rem' }}>
+                Insight summaries have moved to the Insights tab so this view stays focused on live monitoring.
+              </p>
+            </section>
 
             {/* KPI Bar */}
             <section style={styles.kpiGrid}>
@@ -2163,6 +2808,16 @@ export default function Home(): React.ReactElement {
         )}
 
         {/* ── TAB 3: DIAGNOSTICS + DATA ─────────────────────────── */}
+        {activeTab === 'insights' && (
+          <InsightsTab
+            data={data}
+            analytics={analyticsData}
+            mlInference={mlInference}
+            onDownloadReport={downloadInsightReport}
+            onOpenAnalytics={openAnalyticsTab}
+          />
+        )}
+
         {activeTab === 'diagnostics' && (
           <section ref={diagnosticsRef}>
             {/* Sensor Health */}
@@ -2389,7 +3044,7 @@ export default function Home(): React.ReactElement {
               </div>
             </div>
 
-            <DataTable rows={pageRows} />
+            <DataTable rows={pageRows} flaggedIds={anomalyFlaggedIds} />
           </section>
         )}
       </section>

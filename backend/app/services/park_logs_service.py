@@ -633,21 +633,17 @@ def _build_anomaly_flags(
     for row in logs_descending:
         reasons: list[str] = []
 
-        if row["net_flow"] != row["in_count"] - row["out_count"]:
-            reasons.append("net_flow_mismatch")
+        # Match the dashboard spec: only flag sensor gaps for rows that actually
+        # contain a PIR trigger event, and keep the anomaly taxonomy narrow.
+        if row.get("pir_in_trigger", 0) > 0:
+            sensor_gap_in = row.get("sensor_gap_in")
+            if sensor_gap_in is not None and sensor_gap_in > in_threshold:
+                reasons.append("sensor_gap_in_outlier")
 
-        parking_percentage = _to_float(row.get("parking_percentage"))
-        if parking_percentage is not None and (parking_percentage < 0 or parking_percentage > 100):
-            reasons.append("parking_percentage_out_of_range")
-
-        if row["current_vehicles"] < 0:
-            reasons.append("current_vehicles_negative")
-
-        if row["sensor_gap_in"] is not None and row["sensor_gap_in"] > in_threshold:
-            reasons.append("sensor_gap_in_outlier")
-
-        if row["sensor_gap_out"] is not None and row["sensor_gap_out"] > out_threshold:
-            reasons.append("sensor_gap_out_outlier")
+        if row.get("pir_out_trigger", 0) > 0:
+            sensor_gap_out = row.get("sensor_gap_out")
+            if sensor_gap_out is not None and sensor_gap_out > out_threshold:
+                reasons.append("sensor_gap_out_outlier")
 
         occupancy_change = _to_float(row.get("occupancy_change"))
         if occupancy_change is not None and abs(occupancy_change) > jump_threshold:
@@ -656,11 +652,7 @@ def _build_anomaly_flags(
         if not reasons:
             continue
 
-        severity = "LOW"
-        if len(reasons) >= 3:
-            severity = "HIGH"
-        elif len(reasons) == 2:
-            severity = "MEDIUM"
+        severity = "MEDIUM" if len(reasons) >= 2 else "LOW"
 
         anomalies.append(
             {

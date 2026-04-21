@@ -194,14 +194,16 @@ class TestWithDerivedMetrics:
     def test_sensor_gap_in_computed(self):
         logs = self._make_asc_logs()
         result = svc._with_derived_metrics(logs)
-        # |50 - 60| = 10
-        assert result[0]["sensor_gap_in"] == pytest.approx(10.0)
+        # 10 minutes between the first two PIR inbound triggers
+        assert result[1]["sensor_gap_in"] == pytest.approx(600.0)
 
     def test_sensor_gap_out_computed(self):
         logs = self._make_asc_logs()
+        for row in logs:
+            row["pir_out_trigger"] = 1
         result = svc._with_derived_metrics(logs)
-        # |30 - 45| = 15
-        assert result[0]["sensor_gap_out"] == pytest.approx(15.0)
+        # 10 minutes between the first two PIR outbound triggers
+        assert result[1]["sensor_gap_out"] == pytest.approx(600.0)
 
     def test_sensor_gap_none_when_missing(self):
         log = make_log(id=1, ultrasonic_in_cm=None, lidar_in_cm=None)
@@ -238,15 +240,9 @@ class TestBuildAnomalyFlags:
         result = svc._build_anomaly_flags([log], self._baselines())
         assert result == []
 
-    def test_net_flow_mismatch(self):
-        log = make_log(net_flow=5, in_count=5, out_count=3)  # 5 != 5-3=2
-        result = svc._build_anomaly_flags([log], self._baselines())
-        assert len(result) == 1
-        assert "net_flow_mismatch" in result[0]["reasons"]
-
     def test_sensor_gap_in_outlier(self):
         log = make_log(
-            net_flow=2, in_count=5, out_count=3,
+            pir_in_trigger=1,
             sensor_gap_in=200.0,
         )
         result = svc._build_anomaly_flags([log], self._baselines())
@@ -254,7 +250,7 @@ class TestBuildAnomalyFlags:
 
     def test_sensor_gap_out_outlier(self):
         log = make_log(
-            net_flow=2, in_count=5, out_count=3,
+            pir_out_trigger=1,
             sensor_gap_out=200.0,
         )
         result = svc._build_anomaly_flags([log], self._baselines())
@@ -262,57 +258,51 @@ class TestBuildAnomalyFlags:
 
     def test_occupancy_jump(self):
         log = make_log(
-            net_flow=2, in_count=5, out_count=3,
             occupancy_change=10.0,
         )
         result = svc._build_anomaly_flags([log], self._baselines())
         assert any("occupancy_jump" in r["reasons"] for r in result)
 
-    def test_negative_occupancy_jump(self):
+    def test_sensor_gap_ignored_without_pir_trigger(self):
         log = make_log(
-            net_flow=2, in_count=5, out_count=3,
-            occupancy_change=-10.0,
+            pir_in_trigger=0,
+            sensor_gap_in=200.0,
         )
         result = svc._build_anomaly_flags([log], self._baselines())
-        assert any("occupancy_jump" in r["reasons"] for r in result)
+        assert result == []
 
     def test_severity_low_one_reason(self):
-        log = make_log(net_flow=5, in_count=5, out_count=3)
+        log = make_log(pir_in_trigger=1, sensor_gap_in=200.0)
         result = svc._build_anomaly_flags([log], self._baselines())
         assert result[0]["severity"] == "LOW"
 
     def test_severity_medium_two_reasons(self):
         log = make_log(
-            net_flow=5, in_count=5, out_count=3,  # net_flow_mismatch
-            sensor_gap_in=200.0,  # sensor_gap_in_outlier
+            pir_in_trigger=1,
+            sensor_gap_in=200.0,
+            occupancy_change=10.0,
         )
         result = svc._build_anomaly_flags([log], self._baselines())
         assert result[0]["severity"] == "MEDIUM"
 
-    def test_severity_high_three_reasons(self):
+    def test_severity_remains_low_for_single_reason(self):
         log = make_log(
-            net_flow=5, in_count=5, out_count=3,  # net_flow_mismatch
-            sensor_gap_in=200.0,  # sensor_gap_in_outlier
-            sensor_gap_out=200.0,  # sensor_gap_out_outlier
+            pir_in_trigger=1,
+            sensor_gap_in=200.0,
         )
         result = svc._build_anomaly_flags([log], self._baselines())
-        assert result[0]["severity"] == "HIGH"
-
-    def test_parking_percentage_out_of_range(self):
-        log = make_log(net_flow=2, in_count=5, out_count=3, parking_percentage=110.0)
-        result = svc._build_anomaly_flags([log], self._baselines())
-        assert any("parking_percentage_out_of_range" in r["reasons"] for r in result)
+        assert result[0]["severity"] == "LOW"
 
     def test_max_items_limit(self):
         logs = [
-            make_log(id=i, net_flow=5, in_count=5, out_count=3)
+            make_log(id=i, pir_in_trigger=1, sensor_gap_in=200.0)
             for i in range(50)
         ]
         result = svc._build_anomaly_flags(logs, self._baselines(), max_items=10)
         assert len(result) == 10
 
     def test_result_contains_direction_field(self):
-        log = make_log(net_flow=5, in_count=5, out_count=3, direction_view="IN")
+        log = make_log(pir_in_trigger=1, sensor_gap_in=200.0, direction_view="IN")
         result = svc._build_anomaly_flags([log], self._baselines())
         assert result[0]["direction"] == "IN"
         assert result[0]["direction_view"] == "IN"
