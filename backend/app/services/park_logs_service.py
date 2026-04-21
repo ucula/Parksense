@@ -321,6 +321,8 @@ def _matches_filters(
 def _with_derived_metrics(logs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     derived: list[dict[str, Any]] = []
     previous_occupancy: float | None = None
+    last_pir_in_ts = None
+    last_pir_out_ts = None
 
     for row in sorted(logs, key=lambda item: item["timestamp"]):
         current_occupancy = _to_float(row["current_vehicles"])
@@ -329,19 +331,23 @@ def _with_derived_metrics(logs: list[dict[str, Any]]) -> list[dict[str, Any]]:
         occupancy_change = None
         if current_occupancy is not None and previous_occupancy is not None:
             occupancy_change = current_occupancy - previous_occupancy
-
         if current_occupancy is not None:
             previous_occupancy = current_occupancy
 
         in_out_ratio = row["in_count"] / max(out_count, 1)
 
+        # sensor_gap = seconds between consecutive PIR trigger events (only for triggered rows)
         sensor_gap_in = None
-        if row["ultrasonic_in_cm"] is not None and row["lidar_in_cm"] is not None:
-            sensor_gap_in = abs(row["ultrasonic_in_cm"] - row["lidar_in_cm"])
+        if row.get("pir_in_trigger") and row["pir_in_trigger"] > 0:
+            if last_pir_in_ts is not None:
+                sensor_gap_in = (row["timestamp"] - last_pir_in_ts).total_seconds()
+            last_pir_in_ts = row["timestamp"]
 
         sensor_gap_out = None
-        if row["ultrasonic_out_cm"] is not None and row["lidar_out_cm"] is not None:
-            sensor_gap_out = abs(row["ultrasonic_out_cm"] - row["lidar_out_cm"])
+        if row.get("pir_out_trigger") and row["pir_out_trigger"] > 0:
+            if last_pir_out_ts is not None:
+                sensor_gap_out = (row["timestamp"] - last_pir_out_ts).total_seconds()
+            last_pir_out_ts = row["timestamp"]
 
         derived.append(
             {
@@ -627,21 +633,17 @@ def _build_anomaly_flags(
     for row in logs_descending:
         reasons: list[str] = []
 
-        if row["net_flow"] != row["in_count"] - row["out_count"]:
-            reasons.append("net_flow_mismatch")
+        # Match the dashboard spec: only flag sensor gaps for rows that actually
+        # contain a PIR trigger event, and keep the anomaly taxonomy narrow.
+        if row.get("pir_in_trigger", 0) > 0:
+            sensor_gap_in = row.get("sensor_gap_in")
+            if sensor_gap_in is not None and sensor_gap_in > in_threshold:
+                reasons.append("sensor_gap_in_outlier")
 
-        parking_percentage = _to_float(row.get("parking_percentage"))
-        if parking_percentage is not None and (parking_percentage < 0 or parking_percentage > 100):
-            reasons.append("parking_percentage_out_of_range")
-
-        if row["current_vehicles"] < 0:
-            reasons.append("current_vehicles_negative")
-
-        if row["sensor_gap_in"] is not None and row["sensor_gap_in"] > in_threshold:
-            reasons.append("sensor_gap_in_outlier")
-
-        if row["sensor_gap_out"] is not None and row["sensor_gap_out"] > out_threshold:
-            reasons.append("sensor_gap_out_outlier")
+        if row.get("pir_out_trigger", 0) > 0:
+            sensor_gap_out = row.get("sensor_gap_out")
+            if sensor_gap_out is not None and sensor_gap_out > out_threshold:
+                reasons.append("sensor_gap_out_outlier")
 
         occupancy_change = _to_float(row.get("occupancy_change"))
         if occupancy_change is not None and abs(occupancy_change) > jump_threshold:
@@ -650,11 +652,7 @@ def _build_anomaly_flags(
         if not reasons:
             continue
 
-        severity = "LOW"
-        if len(reasons) >= 3:
-            severity = "HIGH"
-        elif len(reasons) == 2:
-            severity = "MEDIUM"
+        severity = "MEDIUM" if len(reasons) >= 2 else "LOW"
 
         anomalies.append(
             {

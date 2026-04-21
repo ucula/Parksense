@@ -50,6 +50,9 @@ next-env.d.ts
 *.sqlite
 *.sqlite3
 postgres_data/
+frontend/public/reports/*
+!frontend/public/reports/.gitkeep
+!frontend/public/reports/Parksense_Report.pdf
 
 # Logs
 logs/

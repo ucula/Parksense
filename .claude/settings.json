@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m py_compile \"c:/Code/DAQ/Project/Parksense/backend/app/services/park_logs_service.py\")",
+      "Bash(python -m py_compile \"c:/Code/DAQ/Project/Parksense/backend/app/api/park_logs.py\")"
+    ]
+  }
+}
