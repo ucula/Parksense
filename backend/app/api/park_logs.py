@@ -393,6 +393,71 @@ async def get_park_logs_analytics():
     }
 
 
+@router.get("/park-logs/ml-inference")
+async def get_ml_inference():
+    """Run ML model on test set (chronological 80/20 split) and return accuracy metrics."""
+    logs, _ = park_logs_service.get_log_source()
+    derived_asc = park_logs_service.with_derived_metrics(logs)
+    derived_sorted = sorted(derived_asc, key=lambda r: r["timestamp"])
+
+    total = len(derived_sorted)
+    if total == 0:
+        return {"model_available": False, "error": "No data"}
+
+    split_idx = int(total * 0.8)
+    train_rows = derived_sorted[:split_idx]
+    test_rows = derived_sorted[split_idx:]
+
+    test_points = []
+    for i in range(split_idx, total):
+        pred = prediction_service.predict_30min(derived_sorted, i)
+        if not pred.get("model_available"):
+            break
+        row = derived_sorted[i]
+        actual_pct = row.get("parking_percentage")
+        if actual_pct is not None:
+            test_points.append({
+                "timestamp": row["timestamp"].isoformat(sep=" "),
+                "actual_pct": round(float(actual_pct), 2),
+                "predicted_pct": pred["predicted_pct"],
+            })
+
+    if not test_points:
+        return {
+            "model_available": False,
+            "error": "Model unavailable or no test predictions generated",
+            "train_count": len(train_rows),
+            "test_count": len(test_rows),
+        }
+
+    errors = [abs(p["predicted_pct"] - p["actual_pct"]) for p in test_points]
+    n = len(errors)
+    rmse = (sum(e ** 2 for e in errors) / n) ** 0.5 if n else 0.0
+    mae = sum(errors) / n if n else 0.0
+    lt2 = sum(1 for e in errors if e < 2) / n * 100 if n else 0.0
+    mid = sum(1 for e in errors if 2 <= e < 5) / n * 100 if n else 0.0
+    gt5 = sum(1 for e in errors if e >= 5) / n * 100 if n else 0.0
+
+    return {
+        "model_available": True,
+        "split_idx": split_idx,
+        "train_count": len(train_rows),
+        "test_count": len(test_rows),
+        "train_start": train_rows[0]["timestamp"].isoformat(sep=" ") if train_rows else None,
+        "train_end": train_rows[-1]["timestamp"].isoformat(sep=" ") if train_rows else None,
+        "test_start": test_rows[0]["timestamp"].isoformat(sep=" ") if test_rows else None,
+        "test_end": test_rows[-1]["timestamp"].isoformat(sep=" ") if test_rows else None,
+        "rmse": round(rmse, 4),
+        "mae": round(mae, 4),
+        "error_distribution": {
+            "lt2_pct": round(lt2, 1),
+            "between_2_5_pct": round(mid, 1),
+            "gt5_pct": round(gt5, 1),
+        },
+        "test_points": test_points,
+    }
+
+
 @router.get("/park-logs/sensor-health")
 async def get_sensor_health():
     """Return sensor health scorecard for the 4 distance sensors."""

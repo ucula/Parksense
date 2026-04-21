@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+from datetime import timedelta
 from typing import Any
 
 PARKING_CAPACITY = 222
@@ -126,6 +127,7 @@ def predict_30min(logs_ascending: list[dict[str, Any]], current_idx: int) -> dic
         current_pct = float(row["parking_percentage"] or 0.0)
         delta = predicted_pct - current_pct
 
+        predicted_for_ts = ts + timedelta(minutes=30)
         return {
             "model_available": True,
             "predicted_pct": round(predicted_pct, 2),
@@ -134,6 +136,8 @@ def predict_30min(logs_ascending: list[dict[str, Any]], current_idx: int) -> dic
             "direction": "UP" if delta > 2 else ("DOWN" if delta < -2 else "FLAT"),
             "predicted_vehicles": round(predicted_pct * PARKING_CAPACITY / 100),
             "is_near_full": predicted_pct >= 80,
+            "snapshot_timestamp": ts.isoformat(sep=" "),
+            "predicted_for_timestamp": predicted_for_ts.isoformat(sep=" "),
         }
     except Exception as exc:
         return {"model_available": False, "error": str(exc)}

@@ -1,7 +1,7 @@
 'use client'
 
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { API_BASE_URL, PARKING_CAPACITY, COLORS, OCC_THRESHOLDS, occColor } from '@/constants'
+import { API_BASE_URL, PARKING_CAPACITY, COLORS, OCC_THRESHOLDS, ANOMALY_THRESHOLDS, occColor } from '@/constants'
 
 // ─────────────────────────────────────────────────────────────
 // Types
@@ -206,6 +206,34 @@ interface PredictionResult {
   predicted_vehicles?: number
   is_near_full?: boolean
   error?: string
+  snapshot_timestamp?: string
+  predicted_for_timestamp?: string
+}
+
+interface MlInferencePoint {
+  timestamp: string
+  actual_pct: number
+  predicted_pct: number
+}
+
+interface MlInferenceData {
+  model_available: boolean
+  split_idx: number
+  train_count: number
+  test_count: number
+  train_start: string | null
+  train_end: string | null
+  test_start: string | null
+  test_end: string | null
+  rmse: number
+  mae: number
+  error_distribution: {
+    lt2_pct: number
+    between_2_5_pct: number
+    gt5_pct: number
+  }
+  test_points: MlInferencePoint[]
+  error?: string
 }
 
 interface HeatmapCell {
@@ -358,6 +386,13 @@ function formatTimestamp(value: string): string {
     day: '2-digit', month: 'short', year: 'numeric',
     hour: '2-digit', minute: '2-digit',
   }).replace(',', '')
+}
+
+function formatShortTimestamp(value: string | null | undefined): string {
+  if (!value) return '—'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }).replace(',', '')
 }
 
 function formatCellValue(column: (typeof TABLE_COLUMNS)[number], value: unknown): string {
@@ -541,6 +576,23 @@ function useSensorHealth() {
   return { sensorHealth, sensorLoading }
 }
 
+function useMlInference() {
+  const [mlInference, setMlInference] = useState<MlInferenceData | null>(null)
+  const [mlInferenceLoading, setMlInferenceLoading] = useState(true)
+
+  useEffect(() => {
+    let active = true
+    fetch(`${API_BASE_URL}/api/park-logs/ml-inference`)
+      .then((r) => r.json())
+      .then((payload) => { if (active) setMlInference(payload as MlInferenceData) })
+      .catch(() => { if (active) setMlInference(null) })
+      .finally(() => { if (active) setMlInferenceLoading(false) })
+    return () => { active = false }
+  }, [])
+
+  return { mlInference, mlInferenceLoading }
+}
+
 // ─────────────────────────────────────────────────────────────
 // Utility components
 // ─────────────────────────────────────────────────────────────
@@ -559,11 +611,11 @@ function KpiCard({ title, value, sub, color }: { title: string; value: string; s
   )
 }
 
-function MlPredictionCard({ pred }: { pred: PredictionResult | null | undefined }): React.ReactElement {
+function MlPredictionCard({ pred, rmse }: { pred: PredictionResult | null | undefined; rmse?: number }): React.ReactElement {
   if (!pred) {
     return (
       <article style={styles.kpiCard}>
-        <p style={styles.kpiTitle}>Predicted (30 min)</p>
+        <p style={styles.kpiTitle}>Model Prediction</p>
         <p style={styles.kpiValueMuted}>Loading…</p>
       </article>
     )
@@ -571,7 +623,7 @@ function MlPredictionCard({ pred }: { pred: PredictionResult | null | undefined 
   if (!pred.model_available) {
     return (
       <article style={styles.kpiCard}>
-        <p style={styles.kpiTitle}>Predicted (30 min)</p>
+        <p style={styles.kpiTitle}>Model Prediction</p>
         <p style={styles.kpiValueMuted}>Model unavailable</p>
         {pred.error && <p style={{ ...styles.kpiSub, color: COLORS.critical, fontSize: '0.7rem', wordBreak: 'break-all' }}>{pred.error}</p>}
       </article>
@@ -581,15 +633,19 @@ function MlPredictionCard({ pred }: { pred: PredictionResult | null | undefined 
   const arrow = pred.direction === 'UP' ? '↑' : pred.direction === 'DOWN' ? '↓' : '→'
   const deltaColor = pred.direction === 'UP' ? COLORS.critical : pred.direction === 'DOWN' ? COLORS.primary : '#888'
   const pctColor = occColor(pred.predicted_pct ?? 0)
+  const atLabel = pred.predicted_for_timestamp ? `AT ${formatShortTimestamp(pred.predicted_for_timestamp)}` : '30 MIN AHEAD'
 
   return (
     <article style={styles.kpiCard}>
-      <p style={styles.kpiTitle}>Predicted (30 min)</p>
+      <p style={styles.kpiTitle}>Model Prediction ({atLabel})</p>
       <p style={{ ...styles.kpiValue, color: pctColor }}>
         {formatNumber(pred.predicted_pct ?? null)}%{' '}
         <span style={{ color: deltaColor, fontSize: '1rem' }}>{arrow} {pred.delta !== undefined && pred.delta >= 0 ? '+' : ''}{formatNumber(pred.delta ?? null)}%</span>
       </p>
-      <p style={styles.kpiSub}>~{pred.predicted_vehicles} vehicles</p>
+      <p style={styles.kpiSub}>
+        ~{pred.predicted_vehicles} vehicles
+        {rmse !== undefined && <span style={{ color: '#7a5c3e', marginLeft: 6 }}>· RMSE ±{rmse.toFixed(2)}%</span>}
+      </p>
       {pred.is_near_full && (
         <p style={{ color: COLORS.critical, fontWeight: 700, fontSize: '0.78rem', marginTop: 4 }}>
           ⚠ {(pred.predicted_pct ?? 0) >= 95 ? 'Full capacity risk' : 'Approaching capacity'}
@@ -635,18 +691,18 @@ function AnomalyBanner({ banner, onDismiss, onViewAll }: { banner: BannerState; 
 // Occupancy Gauge
 // ─────────────────────────────────────────────────────────────
 
-function OccupancyGauge({ vehicles, prediction }: { vehicles: number; prediction: PredictionResult | null | undefined }): React.ReactElement {
+function OccupancyGauge({ vehicles, prediction, asOfTimestamp }: { vehicles: number; prediction: PredictionResult | null | undefined; asOfTimestamp?: string | null }): React.ReactElement {
   const pct = Math.min(100, Math.max(0, (vehicles / PARKING_CAPACITY) * 100))
   const color = occColor(pct)
   return (
     <article style={{ ...styles.chartCard, padding: '16px 20px' }}>
-      <h3 style={styles.chartTitle}>Live Occupancy</h3>
+      <h3 style={styles.chartTitle}>Final Occupancy{asOfTimestamp ? ` (${formatShortTimestamp(asOfTimestamp)})` : ''}</h3>
       <div style={{ position: 'relative', height: 28, background: '#e9ddd0', borderRadius: 8, overflow: 'hidden', marginBottom: 8 }}>
         <div style={{ position: 'absolute', left: 0, top: 0, height: '100%', width: `${pct}%`, background: color, borderRadius: 8, transition: 'width 0.6s ease' }} />
-        {/* 50% marker */}
-        <div style={{ position: 'absolute', left: '50%', top: 0, width: 2, height: '100%', background: 'rgba(0,0,0,0.25)' }} title="50% threshold" />
-        {/* 80% marker */}
-        <div style={{ position: 'absolute', left: '80%', top: 0, width: 2, height: '100%', background: 'rgba(0,0,0,0.35)' }} title="80% threshold" />
+        {/* 50% caution marker */}
+        <div style={{ position: 'absolute', left: '50%', top: 0, width: 2, height: '100%', background: COLORS.warning }} title="Caution: 50%" />
+        {/* 80% critical marker */}
+        <div style={{ position: 'absolute', left: '80%', top: 0, width: 2, height: '100%', background: COLORS.critical }} title="Critical: 80%" />
       </div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
         <p style={{ margin: 0, fontWeight: 700, fontSize: '1.1rem', color }}>
@@ -681,6 +737,7 @@ function TimeSeriesChart({
   showNetFlowToggle = false,
   showNetFlow = true,
   onToggleNetFlow,
+  predictionOverlay,
 }: {
   points: TrendPoint[]
   series: Array<{ key: keyof TrendPoint; label: string; color: string; dashed?: boolean }>
@@ -690,6 +747,7 @@ function TimeSeriesChart({
   showNetFlowToggle?: boolean
   showNetFlow?: boolean
   onToggleNetFlow?: () => void
+  predictionOverlay?: { value: number }
 }): React.ReactElement {
   const clipped = points.slice(-72)
   if (clipped.length === 0) return <EmptyChartState label="No data in selected range" />
@@ -753,17 +811,47 @@ function TimeSeriesChart({
         {clipped.map((p, i) => {
           const v = p[visibleSeries[0].key]
           if (typeof v !== 'number') return null
-          const isOutlier = Math.abs(p.net_flow) > 4
           return (
             <circle key={`${p.timestamp}-m`} cx={getX(i)} cy={getY(v)}
               r={selectedTimestamp === p.timestamp ? 5.2 : 3.5}
-              fill={isOutlier && baselineZero ? COLORS.critical : selectedTimestamp === p.timestamp ? '#0c2d26' : '#184b3f'}
+              fill={selectedTimestamp === p.timestamp ? '#0c2d26' : '#184b3f'}
               style={{ cursor: 'pointer' }}
               onClick={() => onSelectTimestamp(p.timestamp)}>
               <title>{p.timestamp}</title>
             </circle>
           )
         })}
+        {/* Anomaly markers on net_flow series (red dots for |net_flow| > threshold) */}
+        {baselineZero && clipped.map((p, i) => {
+          if (typeof p.net_flow !== 'number') return null
+          if (Math.abs(p.net_flow) <= ANOMALY_THRESHOLDS.occupancyChange) return null
+          return (
+            <circle key={`anomaly-nf-${p.timestamp}`}
+              cx={getX(i)} cy={getY(p.net_flow)}
+              r={6} fill={COLORS.critical} stroke="#fff" strokeWidth="1.5"
+              opacity={0.9}>
+              <title>{`Anomaly: |net_flow|=${Math.abs(p.net_flow).toFixed(1)} > ${ANOMALY_THRESHOLDS.occupancyChange} at ${p.timestamp}`}</title>
+            </circle>
+          )
+        })}
+        {/* Prediction overlay: dashed line + dot from last point to predicted value */}
+        {predictionOverlay && clipped.length > 0 && (() => {
+          const lastIdx = clipped.length - 1
+          const lastVal = clipped[lastIdx][visibleSeries[0].key]
+          if (typeof lastVal !== 'number') return null
+          const x1 = getX(lastIdx)
+          const y1 = getY(lastVal)
+          const predX = x1 + (width - padding - x1) * 0.25 + 30
+          const predY = getY(predictionOverlay.value)
+          return (
+            <g key="prediction-overlay">
+              <line x1={x1} y1={y1} x2={predX} y2={predY}
+                stroke={COLORS.prediction} strokeWidth="2.2" strokeDasharray="6 3" />
+              <circle cx={predX} cy={predY} r={5.5} fill={COLORS.prediction} stroke="#fff" strokeWidth="1.5" />
+              <title>{`Predicted: ${predictionOverlay.value.toFixed(2)}%`}</title>
+            </g>
+          )
+        })()}
       </svg>
       <div style={styles.legendRow}>
         {visibleSeries.map((s) => (
@@ -771,6 +859,177 @@ function TimeSeriesChart({
             <i style={{ ...styles.legendDot, background: s.color }} />{s.label}
           </span>
         ))}
+        {predictionOverlay && (
+          <span style={styles.legendItem}>
+            <i style={{ ...styles.legendDot, background: COLORS.prediction }} />Predicted
+          </span>
+        )}
+        {baselineZero && (
+          <span style={styles.legendItem}>
+            <i style={{ ...styles.legendDot, background: COLORS.critical }} />Anomaly
+          </span>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────
+// Dual Y-axis chart (Temperature °C left / Humidity % right)
+// ─────────────────────────────────────────────────────────────
+
+function DualAxisTimeSeriesChart({
+  points, selectedTimestamp, onSelectTimestamp,
+}: {
+  points: TrendPoint[]
+  selectedTimestamp: string | null
+  onSelectTimestamp: (ts: string) => void
+}): React.ReactElement {
+  const clipped = points.slice(-72)
+  if (clipped.length === 0) return <EmptyChartState label="No data in selected range" />
+
+  const width = 760
+  const height = 260
+  const padL = 46
+  const padR = 46
+  const padT = 14
+  const padB = 30
+
+  const temps = clipped.map((p) => p.api_temperature).filter((v): v is number => v !== null)
+  const hums = clipped.map((p) => p.api_humidity).filter((v): v is number => v !== null)
+
+  if (temps.length === 0 && hums.length === 0) return <EmptyChartState label="No temperature or humidity data" />
+
+  const tMin = temps.length > 0 ? Math.floor(Math.min(...temps)) - 2 : 20
+  const tMax = temps.length > 0 ? Math.ceil(Math.max(...temps)) + 2 : 50
+  const hMin = 0
+  const hMax = 100
+
+  const getX = (i: number) =>
+    clipped.length === 1 ? padL + (width - padL - padR) / 2
+      : padL + (i / (clipped.length - 1)) * (width - padL - padR)
+  const getYT = (v: number) => height - padB - ((v - tMin) / Math.max(tMax - tMin, 1)) * (height - padT - padB)
+  const getYH = (v: number) => height - padB - ((v - hMin) / Math.max(hMax - hMin, 1)) * (height - padT - padB)
+
+  const buildPath = (getY: (v: number) => number, key: 'api_temperature' | 'api_humidity'): string => {
+    let d = ''
+    let gap = true
+    for (let i = 0; i < clipped.length; i++) {
+      const v = clipped[i][key]
+      if (typeof v !== 'number') { gap = true; continue }
+      d += `${gap ? 'M' : 'L'} ${getX(i).toFixed(1)} ${getY(v).toFixed(1)} `
+      gap = false
+    }
+    return d
+  }
+
+  const tPath = buildPath(getYT, 'api_temperature')
+  const hPath = buildPath(getYH, 'api_humidity')
+  const tTicks = Array.from({ length: 5 }, (_, i) => Math.round(tMin + (i / 4) * (tMax - tMin)))
+  const hTicks = [0, 25, 50, 75, 100]
+
+  return (
+    <div style={styles.chartWrap}>
+      <svg viewBox={`0 0 ${width} ${height}`} style={styles.svgChart}>
+        <line x1={padL} y1={padT} x2={padL} y2={height - padB} stroke="#8b6b4c" strokeWidth="1" />
+        <line x1={width - padR} y1={padT} x2={width - padR} y2={height - padB} stroke="#8b6b4c" strokeWidth="1" />
+        <line x1={padL} y1={height - padB} x2={width - padR} y2={height - padB} stroke="#8b6b4c" strokeWidth="1" />
+        {tTicks.map((t) => (
+          <g key={`tt-${t}`}>
+            <line x1={padL - 4} y1={getYT(t)} x2={padL} y2={getYT(t)} stroke="#c2410c" strokeWidth="0.8" />
+            <text x={padL - 6} y={getYT(t) + 4} textAnchor="end" fontSize="9" fill="#c2410c">{t}°</text>
+          </g>
+        ))}
+        {hTicks.map((h) => (
+          <g key={`ht-${h}`}>
+            <line x1={width - padR} y1={getYH(h)} x2={width - padR + 4} y2={getYH(h)} stroke={COLORS.prediction} strokeWidth="0.8" />
+            <text x={width - padR + 6} y={getYH(h) + 4} textAnchor="start" fontSize="9" fill={COLORS.prediction}>{h}%</text>
+          </g>
+        ))}
+        <path d={hPath} fill="none" stroke={COLORS.prediction} strokeWidth="2" opacity="0.85" />
+        <path d={tPath} fill="none" stroke="#c2410c" strokeWidth="2.4" />
+        {clipped.map((p, i) => {
+          if (typeof p.api_temperature !== 'number') return null
+          return (
+            <circle key={`td-${p.timestamp}`} cx={getX(i)} cy={getYT(p.api_temperature)}
+              r={selectedTimestamp === p.timestamp ? 5 : 3} fill="#c2410c" opacity={0.85}
+              style={{ cursor: 'pointer' }} onClick={() => onSelectTimestamp(p.timestamp)}>
+              <title>{`${formatTimestamp(p.timestamp)}: Temp=${p.api_temperature}°C, Hum=${p.api_humidity}%`}</title>
+            </circle>
+          )
+        })}
+      </svg>
+      <div style={styles.legendRow}>
+        <span style={styles.legendItem}><i style={{ ...styles.legendDot, background: '#c2410c' }} />Temperature (°C) — left axis</span>
+        <span style={styles.legendItem}><i style={{ ...styles.legendDot, background: COLORS.prediction }} />Humidity (%) — right axis</span>
+      </div>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────
+// ML Inference Chart (actual vs predicted on test set)
+// ─────────────────────────────────────────────────────────────
+
+function InferenceChart({ data, loading }: { data: MlInferenceData | null; loading: boolean }): React.ReactElement {
+  if (loading) return <EmptyChartState label="Running model on test set…" />
+  if (!data || !data.model_available || data.test_points.length === 0)
+    return <EmptyChartState label="Model unavailable or no test predictions" />
+
+  const pts = data.test_points
+  const width = 760
+  const height = 260
+  const padL = 40
+  const padR = 14
+  const padT = 36
+  const padB = 28
+
+  const allPct = pts.flatMap((p) => [p.actual_pct, p.predicted_pct])
+  const minY = Math.max(0, Math.min(...allPct) - 3)
+  const maxY = Math.min(100, Math.max(...allPct) + 3)
+  const yRange = Math.max(maxY - minY, 1)
+
+  const getX = (i: number) => padL + (i / (pts.length - 1)) * (width - padL - padR)
+  const getY = (v: number) => height - padB - ((v - minY) / yRange) * (height - padT - padB)
+
+  const actualPath = pts.map((p, i) => `${i === 0 ? 'M' : 'L'} ${getX(i).toFixed(1)} ${getY(p.actual_pct).toFixed(1)}`).join(' ')
+  const predPath = pts.map((p, i) => `${i === 0 ? 'M' : 'L'} ${getX(i).toFixed(1)} ${getY(p.predicted_pct).toFixed(1)}`).join(' ')
+
+  const yTicks = Array.from({ length: 5 }, (_, i) => Math.round(minY + (i / 4) * yRange))
+
+  return (
+    <div style={styles.chartWrap}>
+      <svg viewBox={`0 0 ${width} ${height}`} style={{ ...styles.svgChart, height: 260 }}>
+        {/* Train period annotation at top */}
+        <rect x={padL} y={0} width={width - padL - padR} height={padT - 2} fill="#e8f5ef" rx="4" />
+        <text x={padL + 8} y={11} fontSize="9" fill="#1a5c3e" fontWeight="700">
+          Test set: {data.test_start?.slice(0, 10)} – {data.test_end?.slice(0, 10)} · {data.test_count} snapshots
+        </text>
+        <text x={padL + 8} y={22} fontSize="8" fill="#5c4633">
+          ← Train (not shown): {data.train_start?.slice(0, 10)} – {data.train_end?.slice(0, 10)} · {data.train_count} rows
+        </text>
+
+        <line x1={padL} y1={padT} x2={padL} y2={height - padB} stroke="#8b6b4c" strokeWidth="1" />
+        <line x1={padL} y1={height - padB} x2={width - padR} y2={height - padB} stroke="#8b6b4c" strokeWidth="1" />
+
+        {yTicks.map((t) => (
+          <g key={`it-${t}`}>
+            <line x1={padL - 3} y1={getY(t)} x2={padL} y2={getY(t)} stroke="#8b6b4c" strokeWidth="0.8" />
+            <text x={padL - 5} y={getY(t) + 4} textAnchor="end" fontSize="9" fill="#5c4633">{t}%</text>
+          </g>
+        ))}
+
+        {/* Predicted line (dashed blue) */}
+        <path d={predPath} fill="none" stroke={COLORS.prediction} strokeWidth="2" strokeDasharray="6 3" opacity="0.9" />
+        {/* Actual line (solid teal) */}
+        <path d={actualPath} fill="none" stroke={COLORS.primary} strokeWidth="2.2" />
+      </svg>
+      <div style={styles.legendRow}>
+        <span style={styles.legendItem}><i style={{ ...styles.legendDot, background: COLORS.primary }} />Actual parking %</span>
+        <span style={styles.legendItem}><i style={{ ...styles.legendDot, background: COLORS.prediction }} />Predicted (30 min ahead)</span>
+        <span style={{ ...styles.legendItem, color: '#5c4633', fontSize: '0.78rem' }}>
+          RMSE: {data.rmse.toFixed(2)}% · MAE: {data.mae.toFixed(2)}%
+        </span>
       </div>
     </div>
   )
@@ -1263,16 +1522,18 @@ function SensorHealthScorecard({ health }: { health: SensorHealthData | null }):
 
 function SensorBaselineConfig({
   thresholds,
+  anomalyCount,
   onSave,
 }: {
   thresholds: AnomalyThresholds
+  anomalyCount?: number
   onSave: (t: AnomalyThresholds) => void
 }): React.ReactElement {
   const [draft, setDraft] = useState(thresholds)
 
   return (
     <article style={styles.panel}>
-      <h3 style={styles.panelTitle}>Sensor Baseline Thresholds (editable)</h3>
+      <h3 style={styles.panelTitle}>Sensor Baseline Configuration</h3>
       <p style={{ margin: '0 0 10px 0', fontSize: '0.82rem', color: '#5c4633' }}>
         Override the computed p95 thresholds used for anomaly detection. Saving will recompute anomaly flags.
       </p>
@@ -1295,6 +1556,11 @@ function SensorBaselineConfig({
         ))}
       </div>
       <div style={{ marginTop: 10 }}>
+        {anomalyCount !== undefined && (
+          <p style={{ margin: '0 0 8px 0', fontSize: '0.82rem', color: '#5c4633' }}>
+            Changing this will affect <strong style={{ color: COLORS.warning }}>{anomalyCount} anomaly flag{anomalyCount !== 1 ? 's' : ''}</strong> currently active.
+          </p>
+        )}
         <button type="button" style={styles.applyButton} onClick={() => onSave(draft)}>
           Save &amp; Recompute Anomalies
         </button>
@@ -1367,6 +1633,7 @@ export default function Home(): React.ReactElement {
   const { data, loading, error } = useDashboardData(appliedFilters, appliedThresholds, refreshKey)
   const { analyticsData, analyticsLoading } = useAnalyticsData()
   const { sensorHealth, sensorLoading } = useSensorHealth()
+  const { mlInference, mlInferenceLoading } = useMlInference()
 
   // Auto-refresh Tab 1 every 60s
   useEffect(() => {
@@ -1446,6 +1713,8 @@ export default function Home(): React.ReactElement {
   }
 
   const prediction = analyticsData?.prediction ?? null
+  const latestTimestamp = prediction?.snapshot_timestamp ?? (trendPoints.length > 0 ? trendPoints[trendPoints.length - 1].timestamp : null)
+  const firstTimestamp = trendPoints.length > 0 ? trendPoints[0].timestamp : null
 
   // ── Render ──
   return (
@@ -1467,7 +1736,7 @@ export default function Home(): React.ReactElement {
               style={{ ...styles.tabButton, ...(activeTab === tab ? styles.tabButtonActive : {}) }}
               onClick={() => setActiveTab(tab)}
             >
-              {tab === 'live' ? 'Live Monitor' : tab === 'analytics' ? 'Analytics' : 'Diagnostics + Data'}
+              {tab === 'live' ? 'Overview' : tab === 'analytics' ? 'Analytics' : 'Diagnostics + Data'}
             </button>
           ))}
         </section>
@@ -1482,31 +1751,38 @@ export default function Home(): React.ReactElement {
         {/* ── TAB 1: LIVE MONITOR ─────────────────────────────── */}
         {activeTab === 'live' && (
           <>
-            {/* Auto-refresh indicator */}
-            <div style={{ marginBottom: 8, fontSize: '0.78rem', color: '#7a5c3e', display: 'flex', alignItems: 'center', gap: 8 }}>
-              <span>Auto-refresh every 60s</span>
-              {lastUpdated && <span>Last updated: {lastUpdated.toLocaleTimeString()}</span>}
+            {/* Data period banner [NEW-03] */}
+            <div style={{ marginBottom: 10, fontSize: '0.8rem', color: '#5c4633', background: 'rgba(255,248,235,0.9)', border: '1px solid rgba(122,80,40,0.18)', borderRadius: 10, padding: '7px 14px', display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'center' }}>
+              {firstTimestamp && latestTimestamp && (
+                <span>Data period: <strong>{formatTimestamp(firstTimestamp)}</strong> – <strong>{formatTimestamp(latestTimestamp)}</strong></span>
+              )}
+              {latestTimestamp && (
+                <span>Last snapshot: <strong>{formatTimestamp(latestTimestamp)}</strong></span>
+              )}
+              {data?.kpis.total_logs !== undefined && (
+                <span>{data.kpis.total_logs.toLocaleString()} records</span>
+              )}
             </div>
 
             {/* KPI Bar */}
             <section style={styles.kpiGrid}>
               <KpiCard title="Total Logs" value={String(data?.kpis.total_logs ?? 0)} />
-              <KpiCard title="Current Vehicles" value={`${data?.kpis.current_vehicles_latest ?? 0} / ${PARKING_CAPACITY}`} />
+              <KpiCard title="Vehicles at End of Period" value={`${data?.kpis.current_vehicles_latest ?? 0} / ${PARKING_CAPACITY}`} />
               <KpiCard title="Avg Parking %" value={`${formatNumber(data?.kpis.avg_parking_percentage ?? null)}%`} />
               <KpiCard title="Total IN / OUT" value={`${data?.kpis.total_in ?? 0} / ${data?.kpis.total_out ?? 0}`} />
               <KpiCard
-                title="Latest Net Flow"
+                title="Net Flow (Last Snapshot)"
                 value={String(data?.kpis.latest_net_flow ?? 0)}
                 color={(data?.kpis.latest_net_flow ?? 0) < 0 ? COLORS.critical : (data?.kpis.latest_net_flow ?? 0) > 0 ? COLORS.primary : undefined}
               />
               <KpiCard title="Rain Ratio" value={`${((data?.kpis.rain_ratio ?? 0) * 100).toFixed(1)}%`} />
               <KpiCard title="Avg Board Temp" value={`${formatNumber(data?.kpis.avg_board_temperature ?? null)} °C`} />
-              <MlPredictionCard pred={prediction} />
+              <MlPredictionCard pred={prediction} rmse={mlInference?.rmse} />
             </section>
 
             {/* Occupancy Gauge */}
             <section style={{ marginBottom: 10 }}>
-              <OccupancyGauge vehicles={data?.kpis.current_vehicles_latest ?? 0} prediction={prediction} />
+              <OccupancyGauge vehicles={data?.kpis.current_vehicles_latest ?? 0} prediction={prediction} asOfTimestamp={latestTimestamp} />
             </section>
 
             {/* Occupancy + Prediction Trend */}
@@ -1521,6 +1797,9 @@ export default function Home(): React.ReactElement {
                     ]}
                     selectedTimestamp={drilldown.bucketTimestamp}
                     onSelectTimestamp={(ts) => openDiagnosticsWithDrilldown({ bucketTimestamp: ts, rowId: null })}
+                    predictionOverlay={prediction?.model_available && prediction.predicted_pct !== undefined
+                      ? { value: prediction.predicted_pct }
+                      : undefined}
                   />
                 )}
               </article>
@@ -1558,6 +1837,30 @@ export default function Home(): React.ReactElement {
             {/* Anomaly Flags Table */}
             <section style={styles.panel} ref={anomalyTableRef}>
               <h3 style={styles.panelTitle}>Anomaly Flags</h3>
+              {/* Anomaly context summary [NEW-04] */}
+              {!loading && data?.anomaly_flags && data.anomaly_flags.length > 0 && (() => {
+                const flags = data.anomaly_flags
+                const daySpan = firstTimestamp && latestTimestamp
+                  ? Math.max(1, Math.round((new Date(latestTimestamp).getTime() - new Date(firstTimestamp).getTime()) / 86400000))
+                  : 14
+                const perDay = (flags.length / daySpan).toFixed(1)
+                const byCause: Record<string, number> = {}
+                for (const f of flags) for (const r of f.reasons) byCause[r] = (byCause[r] ?? 0) + 1
+                return (
+                  <div style={{ marginBottom: 10, background: '#fff8ed', border: '1px solid rgba(122,80,40,0.18)', borderRadius: 10, padding: '10px 14px', fontSize: '0.82rem', color: '#3f2e1e' }}>
+                    <p style={{ margin: '0 0 6px 0', fontWeight: 700 }}>
+                      {flags.length} anomaly flags in {daySpan} day{daySpan !== 1 ? 's' : ''} (avg {perDay} flags/day)
+                    </p>
+                    <div style={{ paddingLeft: 12, borderLeft: `3px solid ${COLORS.warning}`, display: 'flex', flexDirection: 'column', gap: 2 }}>
+                      {Object.entries(byCause).sort(([, a], [, b]) => b - a).map(([cause, count]) => (
+                        <span key={cause} style={{ color: '#5c4633' }}>
+                          <strong style={{ color: '#3f2e1e' }}>{cause}</strong>: {count} flag{count !== 1 ? 's' : ''}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )
+              })()}
               {loading ? <EmptyChartState label="Loading…" /> : (
                 <AnomalyTable
                   rows={data?.anomaly_flags || []}
@@ -1571,6 +1874,100 @@ export default function Home(): React.ReactElement {
         {/* ── TAB 2: ANALYTICS ─────────────────────────────────── */}
         {activeTab === 'analytics' && (
           <>
+            {/* Section 2.0: Model Accuracy Summary */}
+            <section style={{ ...styles.panel, marginBottom: 14 }}>
+              <h3 style={styles.panelTitle}>Model Accuracy Summary</h3>
+              <p style={{ margin: '0 0 10px 0', fontSize: '0.8rem', color: '#5c4633' }}>
+                LightGBM trained on chronological 80/20 split. Predicted line shown only on unseen test set.
+              </p>
+
+              {/* 4 KPI cards */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 10, marginBottom: 14 }}>
+                <article style={styles.kpiCard}>
+                  <p style={styles.kpiTitle}>Model</p>
+                  <p style={{ ...styles.kpiValue, fontSize: '1rem' }}>LightGBM</p>
+                  <p style={styles.kpiSub}>Chronological split</p>
+                </article>
+                <article style={styles.kpiCard}>
+                  <p style={styles.kpiTitle}>RMSE (Test Set)</p>
+                  <p style={{ ...styles.kpiValue, color: COLORS.primary }}>
+                    {mlInferenceLoading ? '…' : mlInference?.rmse !== undefined ? `${mlInference.rmse.toFixed(2)}%` : 'N/A'}
+                  </p>
+                  <p style={styles.kpiSub}>
+                    {mlInference?.rmse !== undefined ? `≈ ±${(mlInference.rmse * PARKING_CAPACITY / 100).toFixed(1)} vehicles` : ''}
+                  </p>
+                </article>
+                <article style={styles.kpiCard}>
+                  <p style={styles.kpiTitle}>Test Period</p>
+                  <p style={{ ...styles.kpiValue, fontSize: '0.95rem' }}>
+                    {mlInference?.test_start ? mlInference.test_start.slice(5, 10).replace('-', ' Apr').replace('-', ' Apr') : '…'}
+                    {' – '}
+                    {mlInference?.test_end ? mlInference.test_end.slice(5, 10) : '…'}
+                  </p>
+                  <p style={styles.kpiSub}>{mlInference?.test_count ?? '…'} snapshots</p>
+                </article>
+                <article style={styles.kpiCard}>
+                  <p style={styles.kpiTitle}>Train Period</p>
+                  <p style={{ ...styles.kpiValue, fontSize: '0.95rem' }}>
+                    {mlInference?.train_start ? mlInference.train_start.slice(5, 10) : '…'}
+                    {' – '}
+                    {mlInference?.train_end ? mlInference.train_end.slice(5, 10) : '…'}
+                  </p>
+                  <p style={styles.kpiSub}>{mlInference?.train_count ?? '…'} snapshots (80%)</p>
+                </article>
+              </div>
+
+              {/* Inference chart */}
+              <article style={{ ...styles.chartCardWide, marginBottom: 12 }}>
+                <h3 style={styles.chartTitle}>Inference Chart — Actual vs Predicted (Test Set Only)</h3>
+                <InferenceChart data={mlInference} loading={mlInferenceLoading} />
+              </article>
+
+              {/* Error distribution panels */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                {/* Panel left: error breakdown */}
+                <article style={styles.kpiCard}>
+                  <p style={{ ...styles.kpiTitle, marginBottom: 8 }}>Error Distribution (Test Set)</p>
+                  {mlInferenceLoading ? <p style={styles.kpiValueMuted}>Loading…</p> : mlInference?.error_distribution ? (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: '0.85rem' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <div style={{ width: `${mlInference.error_distribution.lt2_pct}%`, maxWidth: '100%', height: 12, background: COLORS.primary, borderRadius: 4, minWidth: 4 }} />
+                        <span style={{ color: COLORS.primary, fontWeight: 700 }}>{mlInference.error_distribution.lt2_pct.toFixed(1)}%</span>
+                        <span style={{ color: '#5c4633' }}>error &lt; 2%</span>
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <div style={{ width: `${mlInference.error_distribution.between_2_5_pct}%`, maxWidth: '100%', height: 12, background: COLORS.warning, borderRadius: 4, minWidth: 4 }} />
+                        <span style={{ color: COLORS.warning, fontWeight: 700 }}>{mlInference.error_distribution.between_2_5_pct.toFixed(1)}%</span>
+                        <span style={{ color: '#5c4633' }}>error 2–5%</span>
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <div style={{ width: `${mlInference.error_distribution.gt5_pct}%`, maxWidth: '100%', height: 12, background: COLORS.critical, borderRadius: 4, minWidth: 4 }} />
+                        <span style={{ color: COLORS.critical, fontWeight: 700 }}>{mlInference.error_distribution.gt5_pct.toFixed(1)}%</span>
+                        <span style={{ color: '#5c4633' }}>error &gt; 5%</span>
+                      </div>
+                      <p style={{ margin: '6px 0 0 0', fontSize: '0.75rem', color: '#7a5c3e', borderTop: '1px solid #f0d9c0', paddingTop: 6 }}>
+                        Note: surge events (e.g. 8 Apr) may produce higher error than typical.
+                      </p>
+                    </div>
+                  ) : <p style={styles.kpiValueMuted}>N/A</p>}
+                </article>
+
+                {/* Panel right: client explanation */}
+                <article style={{ ...styles.kpiCard, display: 'flex', flexDirection: 'column', justifyContent: 'center', textAlign: 'center' }}>
+                  <p style={{ ...styles.kpiTitle, marginBottom: 12 }}>Model Performance in Plain Language</p>
+                  <p style={{ margin: 0, fontSize: '0.88rem', color: '#5c4633', lineHeight: 1.5 }}>
+                    โมเดลสามารถทำนายอัตราการใช้ที่จอดรถ<br />ล่วงหน้า 30 นาทีได้โดยเฉลี่ยผิดพลาด
+                  </p>
+                  <p style={{ margin: '12px 0', fontWeight: 700, fontSize: '2rem', color: COLORS.primary }}>
+                    ±{mlInference?.rmse !== undefined ? (mlInference.rmse * PARKING_CAPACITY / 100).toFixed(1) : '2.3'} คัน
+                  </p>
+                  <p style={{ margin: 0, fontSize: '0.82rem', color: '#7a5c3e' }}>
+                    จากที่จอดรถทั้งหมด {PARKING_CAPACITY} คัน
+                  </p>
+                </article>
+              </div>
+            </section>
+
             <section style={styles.chartGrid}>
               {/* Hourly Heatmap */}
               <article style={styles.chartCardWide}>
@@ -1597,16 +1994,12 @@ export default function Home(): React.ReactElement {
                 )}
               </article>
 
-              {/* Weather Trend */}
+              {/* Weather Trend — dual Y-axis [BUG-03] */}
               <article style={styles.chartCardWide}>
-                <h3 style={styles.chartTitle}>Weather Trend (Temperature &amp; Humidity)</h3>
+                <h3 style={styles.chartTitle}>Weather Trend (Temperature °C left · Humidity % right)</h3>
                 {loading ? <EmptyChartState label="Loading…" /> : (
-                  <TimeSeriesChart
+                  <DualAxisTimeSeriesChart
                     points={trendPoints}
-                    series={[
-                      { key: 'api_temperature', label: 'Temperature (°C)', color: '#c2410c' },
-                      { key: 'api_humidity', label: 'Humidity (%)', color: COLORS.prediction },
-                    ]}
                     selectedTimestamp={drilldown.bucketTimestamp}
                     onSelectTimestamp={(ts) => openDiagnosticsWithDrilldown({ bucketTimestamp: ts, rowId: null })}
                   />
@@ -1622,8 +2015,10 @@ export default function Home(): React.ReactElement {
               {/* Prediction Accuracy Placeholder */}
               <article style={styles.chartCard}>
                 <h3 style={styles.chartTitle}>Prediction Accuracy Tracker</h3>
-                <EmptyChartState label="Will display once historical predictions are collected" />
-                {/* TODO: add confidence intervals and accuracy tracker */}
+                <div style={{ ...styles.emptyState, flexDirection: 'column', gap: 8, padding: 20 }}>
+                  <span>Will display once prediction model is live.</span>
+                  <span style={{ fontWeight: 400, fontSize: '0.82rem', color: '#7b5f44' }}>Tracks daily MAE and prediction vs actual %.</span>
+                </div>
               </article>
             </section>
           </>
@@ -1644,6 +2039,7 @@ export default function Home(): React.ReactElement {
             {/* Sensor Baseline Config */}
             <SensorBaselineConfig
               thresholds={appliedThresholds}
+              anomalyCount={data?.anomaly_flags.length}
               onSave={(t) => {
                 setAppliedThresholds(t)
                 setRefreshKey((k) => k + 1)
