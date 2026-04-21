@@ -2023,66 +2023,6 @@ function PostSurgeDeclineInsightCard({
   )
 }
 
-function SensorCalibrationInsightCard({
-  data,
-  onOpenAnalytics,
-}: {
-  data: DashboardData | null
-  onOpenAnalytics: () => void
-}): React.ReactElement {
-  const ultrasonicValues = useMemo(() => getSensorValues(data?.raw_vs_converted_checks.ultrasonic_in || []), [data])
-  const lidarValues = useMemo(() => getSensorValues(data?.raw_vs_converted_checks.lidar_in || []), [data])
-  const ultrasonicBins = useMemo(() => getHistogramBins(ultrasonicValues, 20), [ultrasonicValues])
-  const lidarBins = useMemo(() => getHistogramBins(lidarValues, 5), [lidarValues])
-  const correlation = getCorrelationValue(data?.correlation_matrix ?? null, 'ultrasonic_in_cm', 'lidar_in_cm')
-  const ultrasonicAvg = ultrasonicValues.length > 0 ? ultrasonicValues.reduce((sum, value) => sum + value, 0) / ultrasonicValues.length : null
-  const lidarAvg = lidarValues.length > 0 ? lidarValues.reduce((sum, value) => sum + value, 0) / lidarValues.length : null
-
-  const renderHistogram = (title: string, bins: HistogramBin[], color: string) => {
-    const maxCount = Math.max(1, ...bins.map((bin) => bin.count))
-    return (
-      <div style={{ flex: 1, minWidth: 290, background: '#fffdf8', border: '1px solid rgba(111,78,55,0.2)', borderRadius: 12, padding: 12 }}>
-        <p style={{ margin: '0 0 8px 0', fontWeight: 700, color: '#163a31' }}>{title}</p>
-        <svg viewBox="0 0 320 180" style={{ width: '100%', height: 180, display: 'block' }}>
-          <line x1="28" y1="18" x2="28" y2="150" stroke="#8b6b4c" strokeWidth="1" />
-          <line x1="28" y1="150" x2="300" y2="150" stroke="#8b6b4c" strokeWidth="1" />
-          {bins.map((bin, index) => {
-            const barHeight = (bin.count / maxCount) * 110
-            const x = 40 + index * 52
-            return (
-              <g key={bin.label}>
-                <rect x={x} y={150 - barHeight} width={36} height={barHeight} fill={color} opacity={0.8} rx={4} />
-                <text x={x + 18} y={165} textAnchor="middle" fontSize="8" fill="#5c4633">{bin.label.split(' ')[0]}</text>
-                <text x={x + 18} y={145 - barHeight} textAnchor="middle" fontSize="8" fill="#7a5c3e">{bin.count}</text>
-              </g>
-            )
-          })}
-        </svg>
-      </div>
-    )
-  }
-
-  return (
-    <InsightCard
-      title="Sensor Calibration Gap"
-      finding={correlation !== null
-        ? `Ultrasonic and lidar readings remain strongly aligned with correlation r = ${correlation.toFixed(2)}, but their average scales differ materially.`
-        : 'Sensor calibration data is too sparse to compute a reliable correlation in the current filter set.'}
-      recommendation="Standardize mounting height so future sensor sets can be compared on the same scale."
-      actionLabel="See in Analytics →"
-      onAction={onOpenAnalytics}
-    >
-      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-        {renderHistogram(`Ultrasonic In avg ${ultrasonicAvg !== null ? ultrasonicAvg.toFixed(1) : 'N/A'} cm`, ultrasonicBins, '#1f6f5b')}
-        {renderHistogram(`Lidar In avg ${lidarAvg !== null ? lidarAvg.toFixed(1) : 'N/A'} cm`, lidarBins, '#d97706')}
-      </div>
-      <p style={{ margin: '10px 0 0 0', fontSize: '0.8rem', color: '#5c4633' }}>
-        {correlation !== null ? `Correlation reference: r = ${correlation.toFixed(2)}` : 'Correlation reference is unavailable.'}
-      </p>
-    </InsightCard>
-  )
-}
-
 function InsightsTab({
   data,
   analytics,
@@ -2118,7 +2058,6 @@ function InsightsTab({
         <PeakDemandInsightCard logs={logs} onOpenAnalytics={onOpenAnalytics} />
         <SurgeComparisonInsightCard logs={logs} onOpenAnalytics={onOpenAnalytics} />
         <PostSurgeDeclineInsightCard logs={logs} onOpenAnalytics={onOpenAnalytics} />
-        <SensorCalibrationInsightCard data={data} onOpenAnalytics={onOpenAnalytics} />
       </div>
 
       <section style={{ ...styles.panel, marginTop: 14 }}>
