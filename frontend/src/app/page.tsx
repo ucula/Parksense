@@ -738,8 +738,8 @@ function KeyFindings({
     // Finding 4: Sensor calibration discrepancy
     list.push({
       index: 4,
-      title: 'Sensor calibration gap: Ultrasonic avg ~110 cm vs. Lidar avg ~18 cm — both measuring the same vehicle',
-      detail: 'Despite a 6× scale difference, the two sensors correlate at r = 0.94, confirming they detect the same events. The discrepancy is due to different mounting heights.',
+      title: 'Sensor calibration gap: Ultrasonic avg ~109.9 cm vs. Lidar avg ~17.7 cm — both measuring the same vehicle',
+      detail: 'Despite a 6× scale difference, the two sensors correlate at r = 0.95, confirming they detect the same events. The discrepancy is due to different mounting heights.',
       action: 'Standardise sensor mounting heights before deploying additional units.',
       accentColor: COLORS.warning,
     })
@@ -821,6 +821,104 @@ function formatDayLabel(value: string): string {
   return date.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })
 }
 
+const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'] as const
+
+function formatDayNameList(dayIndexes: number[]): string {
+  const names = dayIndexes
+    .map((index) => DAY_NAMES[index])
+    .filter((name): name is (typeof DAY_NAMES)[number] => Boolean(name))
+
+  if (names.length === 0) return 'N/A'
+  if (names.length === 1) return names[0]
+  if (names.length === 2) return `${names[0]} and ${names[1]}`
+  return `${names.slice(0, -1).join(', ')}, and ${names[names.length - 1]}`
+}
+
+function getDayOfWeekAverages(logs: ParkingLogRow[]): Array<{ dayIndex: number; dayName: string; avgPct: number | null; count: number }> {
+  const buckets = new Map<number, number[]>()
+  for (const row of logs) {
+    if (row.parking_percentage === null) continue
+    const dayIndex = new Date(row.timestamp).getDay()
+    const existing = buckets.get(dayIndex) ?? []
+    existing.push(row.parking_percentage)
+    buckets.set(dayIndex, existing)
+  }
+
+  return DAY_NAMES.map((dayName, dayIndex) => {
+    const values = buckets.get(dayIndex) ?? []
+    const avgPct = values.length > 0 ? values.reduce((sum, value) => sum + value, 0) / values.length : null
+    return { dayIndex, dayName, avgPct, count: values.length }
+  })
+}
+
+function getPeakDayIndexes(logs: ParkingLogRow[]): number[] {
+  const stats = getDayOfWeekAverages(logs).filter((item) => item.avgPct !== null && item.count > 0)
+  if (stats.length === 0) return []
+
+  const sorted = [...stats].sort((a, b) => (b.avgPct ?? 0) - (a.avgPct ?? 0))
+  const top = sorted[0]
+  const second = sorted[1]
+  if (!top) return []
+
+  if (!second || (top.avgPct ?? 0) >= (second.avgPct ?? 0) * 1.5) {
+    return [top.dayIndex]
+  }
+
+  return sorted.slice(0, 2).map((item) => item.dayIndex).sort((a, b) => a - b)
+}
+
+function getRepresentativeNormalDay(daily: DailyInsightStat[], excludedDates: Set<string> = new Set()): DailyInsightStat | null {
+  const candidates = daily.filter((item) => !excludedDates.has(item.date) && item.avgPct !== null)
+  if (candidates.length === 0) return null
+
+  const totals = candidates.map((item) => item.totalIn).sort((a, b) => a - b)
+  const mid = Math.floor(totals.length / 2)
+  const median = totals.length % 2 === 0 ? (totals[mid - 1] + totals[mid]) / 2 : totals[mid]
+
+  return candidates.reduce<DailyInsightStat | null>((best, item) => {
+    if (best === null) return item
+    const bestDistance = Math.abs(best.totalIn - median)
+    const itemDistance = Math.abs(item.totalIn - median)
+    if (itemDistance < bestDistance) return item
+    if (itemDistance > bestDistance) return best
+    return item.date > best.date ? item : best
+  }, null)
+}
+
+function getPearsonCorrelationFromLogs(
+  logs: ParkingLogRow[],
+  xKey: keyof ParkingLogRow,
+  yKey: keyof ParkingLogRow,
+): number | null {
+  const pairs: Array<{ x: number; y: number }> = []
+  for (const row of logs) {
+    const xValue = row[xKey]
+    const yValue = row[yKey]
+    if (typeof xValue !== 'number' || typeof yValue !== 'number') continue
+    if (!Number.isFinite(xValue) || !Number.isFinite(yValue)) continue
+    if (xValue <= 0 || yValue <= 0) continue
+    pairs.push({ x: xValue, y: yValue })
+  }
+  if (pairs.length < 3) return null
+
+  const meanX = pairs.reduce((sum, pair) => sum + pair.x, 0) / pairs.length
+  const meanY = pairs.reduce((sum, pair) => sum + pair.y, 0) / pairs.length
+  let numerator = 0
+  let denominatorX = 0
+  let denominatorY = 0
+
+  for (const pair of pairs) {
+    const dx = pair.x - meanX
+    const dy = pair.y - meanY
+    numerator += dx * dy
+    denominatorX += dx ** 2
+    denominatorY += dy ** 2
+  }
+
+  if (denominatorX === 0 || denominatorY === 0) return null
+  return numerator / Math.sqrt(denominatorX * denominatorY)
+}
+
 function getDailyInsightStats(logs: ParkingLogRow[]): DailyInsightStat[] {
   const byDay = new Map<string, DailyInsightStat>()
 
@@ -867,7 +965,7 @@ function getDailyInsightStats(logs: ParkingLogRow[]): DailyInsightStat[] {
   return result
 }
 
-function getHourlySplitPoints(logs: ParkingLogRow[]): HourlySplitPoint[] {
+function getHourlySplitPoints(logs: ParkingLogRow[], peakDaySet: Set<number> = new Set(getPeakDayIndexes(logs))): HourlySplitPoint[] {
   const points: HourlySplitPoint[] = Array.from({ length: 24 }, (_, hour) => ({
     hour,
     peakAvg: null,
@@ -875,7 +973,6 @@ function getHourlySplitPoints(logs: ParkingLogRow[]): HourlySplitPoint[] {
     peakCount: 0,
     otherCount: 0,
   }))
-  const peakDaySet = new Set([4, 5])
 
   for (const row of logs) {
     if (row.parking_percentage === null) continue
@@ -964,10 +1061,13 @@ function buildInsightReportMarkdown({
   logs: ParkingLogRow[]
 }): string {
   const daily = getDailyInsightStats(logs)
-  const hourlySplit = getHourlySplitPoints(logs)
+  const peakDayIndexes = getPeakDayIndexes(logs)
+  const peakDayLabel = peakDayIndexes.length > 0 ? formatDayNameList(peakDayIndexes) : 'N/A'
+  const hourlySplit = getHourlySplitPoints(logs, new Set(peakDayIndexes))
   const peakHours = hourlySplit.filter((point) => point.peakAvg !== null).map((point) => point.peakAvg as number)
   const otherHours = hourlySplit.filter((point) => point.otherAvg !== null).map((point) => point.otherAvg as number)
   const mean = (values: number[]): number | null => values.length > 0 ? values.reduce((sum, value) => sum + value, 0) / values.length : null
+  const peakDay = [...daily].sort((a, b) => (b.avgPct ?? 0) - (a.avgPct ?? 0))[0] ?? null
   const surgeDay = daily.reduce<DailyInsightStat | null>(
     (best, item) => {
       if (best === null) return item
@@ -975,23 +1075,26 @@ function buildInsightReportMarkdown({
     },
     null,
   )
+  const normalDay = getRepresentativeNormalDay(daily, surgeDay ? new Set([surgeDay.date]) : new Set())
   const latestDay = daily[daily.length - 1] ?? null
   const trend = linearRegression(
     daily
       .map((item, index) => ({ x: index, y: item.avgPct ?? 0 }))
       .filter((item) => item.y > 0),
   )
-  const ultrasonicAvg = analytics?.temp_buckets?.length ? analytics.temp_buckets[0].avg_pct : null
+  const correlation = getPearsonCorrelationFromLogs(logs, 'ultrasonic_in_cm', 'lidar_in_cm')
+  const mlRmseVehicles = mlInference?.rmse !== undefined ? (mlInference.rmse * PARKING_CAPACITY / 100) : null
+  const lowDemandDaysAfterPeak = peakDay ? daily.slice(daily.findIndex((item) => item.date === peakDay.date) + 1).filter((item) => item.avgPct !== null && item.avgPct < 5).length : 0
 
   return [
     '# Parking Dashboard Full Report',
     '',
     '## Executive Summary',
-    '- Peak demand is concentrated on Thursday and Friday between 12:00 and 15:00.',
+    `- Peak demand is concentrated on ${peakDayLabel} between 12:00 and 15:00.`,
     surgeDay ? `- The busiest daily inbound volume in the selected range was ${surgeDay.totalIn} vehicles on ${surgeDay.label}.` : '- A daily surge point could not be isolated from the current filter set.',
     latestDay ? `- The latest day closed at ${latestDay.avgPct !== null ? `${latestDay.avgPct.toFixed(1)}%` : 'N/A'} average occupancy.` : '- A latest-day baseline could not be calculated.',
     mlInference?.model_available && mlInference.rmse !== undefined
-      ? `- The 30-minute prediction model reported RMSE ${mlInference.rmse.toFixed(2)}%.`
+      ? `- The 30-minute prediction model reported RMSE ${mlInference.rmse.toFixed(2)}% (about ±${mlRmseVehicles !== null ? mlRmseVehicles.toFixed(1) : 'N/A'} vehicles).`
       : '- The 30-minute prediction model was not available during export.',
     '',
     '## Methodology Note',
@@ -1004,22 +1107,33 @@ function buildInsightReportMarkdown({
     'Recommendation: Consider dynamic pricing or reservations for the busiest three-hour window.',
     '',
     '### 2. Surge Event vs Normal Day',
-    surgeDay
-      ? `The strongest day in the selected period recorded ${surgeDay.totalIn} inbound vehicles and pushed occupancy to ${surgeDay.maxPct !== null ? surgeDay.maxPct.toFixed(1) : 'N/A'}%.`
+    surgeDay && normalDay
+      ? `The surge day (${surgeDay.label}) recorded ${surgeDay.totalIn} inbound vehicles and pushed occupancy to ${surgeDay.maxPct !== null ? surgeDay.maxPct.toFixed(1) : 'N/A'}%, while a typical comparison day (${normalDay.label}) recorded approximately ${normalDay.totalIn} inbound vehicles with a peak occupancy of ${normalDay.maxPct !== null ? normalDay.maxPct.toFixed(1) : 'N/A'}%.`
       : 'The current data window was too small to isolate a clear surge day.',
     'Recommendation: Prepare an overflow strategy for event-driven demand spikes.',
     '',
     '### 3. Post-Surge Demand Decline',
-    trend
-      ? `Daily occupancy slope is ${trend.slope.toFixed(3)} points per day, which supports a declining baseline after the surge period.`
+    peakDay && latestDay
+      ? `Occupancy peaked at ${peakDay.avgPct !== null ? peakDay.avgPct.toFixed(1) : 'N/A'}% on ${peakDay.label} and declined to ${latestDay.avgPct !== null ? latestDay.avgPct.toFixed(1) : 'N/A'}% by ${latestDay.label} - a fall of ${(peakDay.avgPct !== null && latestDay.avgPct !== null ? (peakDay.avgPct - latestDay.avgPct).toFixed(1) : 'N/A')} percentage points.${trend ? ` The trend slope is ${trend.slope.toFixed(3)} points per day.` : ''}`
       : 'A daily occupancy trend could not be computed from the available rows.',
-    'Recommendation: Continue collecting data for at least 4 to 6 more weeks before making infrastructure decisions.',
+    lowDemandDaysAfterPeak >= 3
+      ? `The post-surge baseline stayed below 5% on ${lowDemandDaysAfterPeak} later day${lowDemandDaysAfterPeak !== 1 ? 's' : ''}, suggesting the facility is mostly idle outside the surge window.`
+      : 'The current daily baseline is still too short to confirm whether the post-surge decline is permanent.',
+    lowDemandDaysAfterPeak >= 3
+      ? 'Recommendation: Continue monitoring for 4 to 6 more weeks to confirm whether this is the true steady state or whether another demand cycle exists.'
+      : 'Recommendation: Continue collecting data for at least 4 to 6 more weeks before making infrastructure decisions.',
     '',
     '### 4. Sensor Calibration Gap',
-    ultrasonicAvg !== null
-      ? `The sensor calibration view still shows a large scale difference between ultrasonic and lidar readings, even though the underlying event patterns remain aligned.`
+    correlation !== null
+      ? `The sensor calibration view still shows a large scale difference between ultrasonic and lidar readings, even though the underlying event patterns remain aligned, with correlation r = ${correlation !== null ? correlation.toFixed(2) : 'N/A'}.`
       : 'Sensor calibration context was not available in the current export.',
     'Recommendation: Standardize mounting height before deploying the next sensor set.',
+    '',
+    '### 5. ML Model Accuracy',
+    mlInference?.model_available && mlInference.rmse !== undefined && mlInference.mae !== undefined && mlInference.error_distribution
+      ? `RMSE ${mlInference.rmse.toFixed(2)}% (about ±${mlRmseVehicles !== null ? mlRmseVehicles.toFixed(1) : 'N/A'} vehicles out of ${PARKING_CAPACITY}), MAE ${mlInference.mae.toFixed(2)}%, and error distribution < 2%: ${mlInference.error_distribution.lt2_pct.toFixed(1)}%, 2-5%: ${mlInference.error_distribution.between_2_5_pct.toFixed(1)}%, > 5%: ${mlInference.error_distribution.gt5_pct.toFixed(1)}%.`
+      : 'The ML model metrics were not available during export.',
+    'Recommendation: Use the model as a short-term planning aid while continuing to monitor error drift.',
     '',
     '## Limitations and Caveats',
     '- The data window is short, so seasonality cannot be trusted yet.',
@@ -1713,7 +1827,11 @@ function PeakDemandInsightCard({
   logs: ParkingLogRow[]
   onOpenAnalytics: () => void
 }): React.ReactElement {
-  const points = useMemo(() => getHourlySplitPoints(logs), [logs])
+  const peakDayIndexes = useMemo(() => getPeakDayIndexes(logs), [logs])
+  const peakDayLabel = peakDayIndexes.length > 0 ? formatDayNameList(peakDayIndexes) : 'N/A'
+  const peakDayScope = peakDayIndexes.length === 1 ? 'Peak day' : 'Peak days'
+  const peakDayVerb = peakDayIndexes.length === 1 ? 'is' : 'are'
+  const points = useMemo(() => getHourlySplitPoints(logs, new Set(peakDayIndexes)), [logs, peakDayIndexes])
   const peakMax = Math.max(...points.map((point) => Math.max(point.peakAvg ?? 0, point.otherAvg ?? 0)), 1)
   const width = 760
   const height = 240
@@ -1727,7 +1845,7 @@ function PeakDemandInsightCard({
   return (
     <InsightCard
       title="Peak Demand Window"
-      finding={`Thursday and Friday between 12:00 and 15:00 are the busiest hours, with peak-day occupancy averaging ${peakMean !== null ? peakMean.toFixed(1) : 'N/A'}% versus ${otherMean !== null ? otherMean.toFixed(1) : 'N/A'}% on other days.`}
+      finding={`${peakDayLabel} between 12:00 and 15:00 ${peakDayVerb} the busiest hours, with peak-day occupancy averaging ${peakMean !== null ? peakMean.toFixed(1) : 'N/A'}% versus ${otherMean !== null ? otherMean.toFixed(1) : 'N/A'}% on other days.`}
       recommendation="Use a dynamic pricing or reservation policy for the highest-demand three-hour window."
       actionLabel="See in Analytics →"
       onAction={onOpenAnalytics}
@@ -1752,7 +1870,7 @@ function PeakDemandInsightCard({
         })}
       </svg>
       <div style={styles.legendRow}>
-        <span style={styles.legendItem}><i style={{ ...styles.legendDot, background: '#d97706' }} />Peak days (Thu-Fri)</span>
+        <span style={styles.legendItem}><i style={{ ...styles.legendDot, background: '#d97706' }} />{peakDayScope} ({peakDayLabel})</span>
         <span style={styles.legendItem}><i style={{ ...styles.legendDot, background: '#1f6f5b' }} />Other days</span>
         <span style={styles.legendItem}><i style={{ ...styles.legendDot, background: '#f59e0b' }} />12:00-15:00 focus window</span>
       </div>
@@ -1770,7 +1888,7 @@ function SurgeComparisonInsightCard({
   const daily = useMemo(() => getDailyInsightStats(logs), [logs])
   const sortedByVolume = [...daily].sort((a, b) => b.totalIn - a.totalIn)
   const surgeDay = sortedByVolume[0] ?? null
-  const normalDay = sortedByVolume[Math.min(1, sortedByVolume.length - 1)] ?? null
+  const normalDay = getRepresentativeNormalDay(daily, surgeDay ? new Set([surgeDay.date]) : new Set())
 
   const dayPoints = (dateKey: string | null) => {
     if (!dateKey) return Array.from({ length: 24 }, (_, hour) => ({ hour, inCount: null as number | null, outCount: null as number | null }))
@@ -1821,7 +1939,9 @@ function SurgeComparisonInsightCard({
   return (
     <InsightCard
       title="Surge Event vs Normal Day"
-      finding={surgeDay ? `The busiest day in the selected range recorded ${surgeDay.totalIn} inbound vehicles, while a normal comparison day stayed much lower.` : 'There is not enough variation in the selected data window to isolate a clear surge day.'}
+      finding={surgeDay && normalDay
+        ? `The surge day (${surgeDay.label}) recorded ${surgeDay.totalIn} inbound vehicles and pushed occupancy to ${surgeDay.maxPct !== null ? surgeDay.maxPct.toFixed(1) : 'N/A'}%, while a typical comparison day (${normalDay.label}) recorded approximately ${normalDay.totalIn} inbound vehicles with a peak occupancy of ${normalDay.maxPct !== null ? normalDay.maxPct.toFixed(1) : 'N/A'}%.`
+        : 'There is not enough variation in the selected data window to isolate a clear surge day.'}
       recommendation="Plan overflow parking and event-day monitoring for surge traffic instead of assuming the peak pattern is normal."
       actionLabel="See in Analytics →"
       onAction={onOpenAnalytics}
@@ -1845,6 +1965,10 @@ function PostSurgeDeclineInsightCard({
   const trend = linearRegression(daily.map((item, index) => ({ x: index, y: item.avgPct ?? 0 })).filter((item) => item.y > 0))
   const latest = daily[daily.length - 1] ?? null
   const peak = [...daily].sort((a, b) => (b.avgPct ?? 0) - (a.avgPct ?? 0))[0] ?? null
+  const peakIndex = peak ? daily.findIndex((item) => item.date === peak.date) : -1
+  const lowDemandDaysAfterPeak = peakIndex >= 0
+    ? daily.slice(peakIndex + 1).filter((item) => item.avgPct !== null && item.avgPct < 5).length
+    : 0
   const width = 760
   const height = 220
   const padding = 32
@@ -1859,8 +1983,12 @@ function PostSurgeDeclineInsightCard({
   return (
     <InsightCard
       title="Post-Surge Demand Decline"
-      finding={peak && latest ? `Occupancy eased from a peak of ${peak.avgPct !== null ? peak.avgPct.toFixed(1) : 'N/A'}% to ${latest.avgPct !== null ? latest.avgPct.toFixed(1) : 'N/A'}% by the latest day in the range.` : 'The available data does not yet show a clean enough daily pattern for a decline readout.'}
-      recommendation="Keep monitoring for another 4 to 6 weeks before treating the current baseline as stable."
+      finding={peak && latest
+        ? `Occupancy peaked at ${peak.avgPct !== null ? peak.avgPct.toFixed(1) : 'N/A'}% on ${peak.label} and declined to ${latest.avgPct !== null ? latest.avgPct.toFixed(1) : 'N/A'}% by the latest day in the range.`
+        : 'The available data does not yet show a clean enough daily pattern for a decline readout.'}
+      recommendation={lowDemandDaysAfterPeak >= 3
+        ? 'The post-surge baseline appears extremely low. Continue monitoring for 4 to 6 more weeks to confirm whether this is the true steady state or whether another demand cycle exists.'
+        : 'Keep monitoring for another 4 to 6 weeks before treating the current baseline as stable.'}
       actionLabel="See in Analytics →"
       onAction={onOpenAnalytics}
     >
@@ -1889,6 +2017,11 @@ function PostSurgeDeclineInsightCard({
         <span style={styles.legendItem}><i style={{ ...styles.legendDot, background: '#1f6f5b' }} />Daily average occupancy</span>
         <span style={styles.legendItem}><i style={{ ...styles.legendDot, background: '#d97706' }} />Trend line</span>
       </div>
+      {lowDemandDaysAfterPeak >= 3 && (
+        <p style={{ margin: '8px 0 0 0', fontSize: '0.8rem', color: '#5c4633' }}>
+          Demand stayed below 5% on {lowDemandDaysAfterPeak} later day{lowDemandDaysAfterPeak !== 1 ? 's' : ''}, suggesting the facility is mostly idle outside the surge window.
+        </p>
+      )}
     </InsightCard>
   )
 }
@@ -1994,7 +2127,7 @@ function InsightsTab({
       <section style={{ ...styles.panel, marginTop: 14 }}>
         <h3 style={styles.panelTitle}>Report Notes</h3>
         <p style={{ margin: 0, color: '#5c4633', fontSize: '0.84rem' }}>
-          The report export is a Markdown template that mirrors these four insights, adds methodology notes, and keeps prose separate from the dashboard surface.
+          The report export is a Markdown template that mirrors these four insights, adds methodology and model notes, and keeps prose separate from the dashboard surface.
         </p>
         {analyticsBaselineAvg !== null && (
           <p style={{ margin: '8px 0 0 0', color: '#5c4633', fontSize: '0.84rem' }}>
@@ -2824,7 +2957,9 @@ export default function Home(): React.ReactElement {
             <section style={styles.panel}>
               <h3 style={styles.panelTitle}>Sensor Health Scorecard</h3>
               <p style={{ margin: '0 0 10px 0', fontSize: '0.8rem', color: '#5c4633' }}>
-                Current data has ~65.9% zero rate — WARN/CRITICAL is expected for all sensors.
+                {sensorHealth && Object.keys(sensorHealth).length > 0
+                  ? `Current data has ~${(100 - (Object.values(sensorHealth).reduce((sum, entry) => sum + entry.active_rate, 0) / Object.keys(sensorHealth).length)).toFixed(1)}% zero rate — WARN/CRITICAL is expected for all sensors.`
+                  : 'Current data has a high zero rate — WARN/CRITICAL is expected for all sensors.'}
               </p>
               {sensorLoading ? <EmptyChartState label="Loading sensor health…" /> : <SensorHealthScorecard health={sensorHealth} />}
             </section>
